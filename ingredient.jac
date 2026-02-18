@@ -42,6 +42,17 @@ obj RecipePlan {
 """Generate a recipe using the user's profile and pantry ingredients."""
 def generate_recipe(profile: user, pantry_ingredients: list[Ingredient]) -> RecipePlan by llm();
 
+obj ReceiptPantryParse {
+    has ingredients: list[Ingredient];
+    has notes: str;
+}
+
+"""Parse OCR receipt text into pantry ingredients.
+Use one item per food ingredient line and estimate missing quantities.
+Skip non-food lines and keep units inside the supported Unit enum.
+"""
+def parse_receipt_into_pantry_items(receipt_text: str) -> ReceiptPantryParse by llm();
+
 # Persisted recipe summary node.
 node Recipe {
     has name: str,
@@ -186,5 +197,39 @@ walker:pub ClearGeneratedRecipe {
 
     can done with Root exit {
         report {"cleared": True};
+    }
+}
+
+# Convert OCR receipt text into pantry ingredients with a single LLM call.
+walker:pub ParseReceiptTextToPantry {
+    has receipt_text: str;
+
+    can run with Root entry {
+        try {
+            parsed = parse_receipt_into_pantry_items(self.receipt_text);
+            items: list = [];
+            for ing in parsed.ingredients {
+                items.append({
+                    "name": ing.name,
+                    "quantity": ing.quantity,
+                    "unit": str(ing.unit).split(".")[-1].upper(),
+                    "cost": ing.cost,
+                    "protein": ing.protein,
+                    "carb": ing.carb,
+                    "fat": ing.fat
+                });
+            }
+            report {
+                "ok": True,
+                "items": items,
+                "notes": parsed.notes
+            };
+        } except Exception as e {
+            report {
+                "ok": False,
+                "items": [],
+                "error": str(e)
+            };
+        }
     }
 }

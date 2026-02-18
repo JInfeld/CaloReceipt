@@ -24,5 +24,9 @@ import from user {
 import from ingredient {
     GenerateRecipeFromPantry,
     ListGeneratedRecipe,
-    ClearGeneratedRecipe
+    ClearGeneratedRecipe,
+    ParseReceiptTextToPantry
+}
+import from receipt {
+    ExtractReceiptText
 }

@@ -8,7 +8,12 @@ sv import from user {
 sv import from ingredient {
     GenerateRecipeFromPantry,
     ListGeneratedRecipe,
-    ClearGeneratedRecipe
+    ClearGeneratedRecipe,
+    ParseReceiptTextToPantry
+}
+
+sv import from receipt {
+    ExtractReceiptText
 }
 
 # Single-page test console for the full backend flow:
@@ -20,6 +25,7 @@ def:pub app -> JsxElement {
         macro_needs: dict = {},
         pantry: list = [],
         recipe: dict = {},
+        receipt_parse: dict = {},
         last_error: dict = {},
         debug_events: list = [],
         show_debug: bool = true;
@@ -41,6 +47,10 @@ def:pub app -> JsxElement {
         ing_protein: str = "",
         ing_carb: str = "",
         ing_fat: str = "";
+
+    has receipt_image_name: str = "",
+        receipt_image_b64: str = "",
+        receipt_ocr_text: str = "";
 
     # Parse numeric text inputs safely to prevent NaN payloads.
     def to_num(value: str, fallback: float = 0.0) -> float {
@@ -170,6 +180,122 @@ def:pub app -> JsxElement {
         pantry = pantry.filter(
             lambda item: dict -> bool { return item.name != name; }
         );
+    }
+
+    # Merge parsed receipt items into pantry by lowercase name + unit.
+    def merge_items_into_pantry(items: list) -> None {
+        for new_item in items {
+            merged = false;
+            next_pantry: list = [];
+            for existing in pantry {
+                if (
+                    existing.name.toLowerCase() == new_item.name.toLowerCase() and
+                    existing.unit.toUpperCase() == new_item.unit.toUpperCase()
+                ) {
+                    next_pantry = next_pantry.concat([{
+                        "name": existing.name,
+                        "quantity": to_num(existing.quantity.toString()) + to_num(new_item.quantity.toString()),
+                        "unit": existing.unit.toUpperCase(),
+                        "cost": to_num(existing.cost.toString()) + to_num(new_item.cost.toString()),
+                        "protein": to_num(existing.protein.toString()) + to_num(new_item.protein.toString()),
+                        "carb": to_num(existing.carb.toString()) + to_num(new_item.carb.toString()),
+                        "fat": to_num(existing.fat.toString()) + to_num(new_item.fat.toString())
+                    }]);
+                    merged = true;
+                } else {
+                    next_pantry = next_pantry.concat([existing]);
+                }
+            }
+            if not merged {
+                next_pantry = next_pantry.concat([{
+                    "name": new_item.name,
+                    "quantity": new_item.quantity,
+                    "unit": new_item.unit.toUpperCase(),
+                    "cost": new_item.cost,
+                    "protein": new_item.protein,
+                    "carb": new_item.carb,
+                    "fat": new_item.fat
+                }]);
+            }
+            pantry = next_pantry;
+        }
+    }
+
+    # Read chosen receipt image into base64 for backend OCR walker.
+    def on_receipt_image_change(e: any) -> None {
+        files = e.target.files;
+        if not files or files.length == 0 {
+            receipt_image_name = "";
+            receipt_image_b64 = "";
+            return;
+        }
+        file = files[0];
+        receipt_image_name = file.name;
+        reader = Reflect.construct(FileReader, []);
+        reader.onload = lambda ev: any -> None {
+            data_url = ev.target.result;
+            raw = data_url.split(",")[1];
+            receipt_image_b64 = raw;
+            status = "Receipt image loaded. Click OCR Import to add pantry items.";
+        };
+        reader.onerror = lambda _ev: any -> None {
+            status = "Failed to read selected receipt image.";
+            add_debug("error", "receipt.file_read_error", {"file_name": file.name});
+        };
+        reader.readAsDataURL(file);
+    }
+
+    # OCR receipt image, map text -> pantry ingredients (single LLM call), then merge to pantry.
+    async def import_receipt_to_pantry -> None {
+        if not receipt_image_b64 {
+            status = "Select a receipt image first.";
+            return;
+        }
+
+        loading = true;
+        status = "Running OCR on receipt...";
+        try {
+            add_debug("request", "ExtractReceiptText", {
+                "image_name": receipt_image_name,
+                "is_base64": true,
+                "languages": ["en"]
+            });
+            ocr_result = root spawn ExtractReceiptText(
+                image_input=receipt_image_b64,
+                is_base64=true,
+                languages=["en"]
+            );
+            add_debug("response", "ExtractReceiptText", {"raw_result": ocr_result});
+            ocr_out = ocr_result.reports[0];
+            if not ocr_out.ok {
+                status = "Receipt OCR failed: " + ocr_out.error;
+                add_debug("error", "ExtractReceiptText.reported_error", {"ocr_out": ocr_out});
+                loading = false;
+                return;
+            }
+
+            receipt_ocr_text = ocr_out.text;
+            status = "Parsing receipt food lines into pantry items...";
+            add_debug("request", "ParseReceiptTextToPantry", {"receipt_text": receipt_ocr_text});
+            parse_result = root spawn ParseReceiptTextToPantry(receipt_text=receipt_ocr_text);
+            add_debug("response", "ParseReceiptTextToPantry", {"raw_result": parse_result});
+            parse_out = parse_result.reports[0];
+            receipt_parse = parse_out;
+            if not parse_out.ok {
+                status = "Receipt parse failed: " + parse_out.error;
+                add_debug("error", "ParseReceiptTextToPantry.reported_error", {"parse_out": parse_out});
+                loading = false;
+                return;
+            }
+
+            merge_items_into_pantry(parse_out.items);
+            status = "Receipt imported. Pantry updated with parsed items.";
+        } except Exception as e {
+            err_payload = build_error_payload("ReceiptImport.exception", e);
+            add_debug("error", "ReceiptImport.exception", err_payload);
+            status = "Receipt import failed: " + err_payload.error_text;
+        }
+        loading = false;
     }
 
     # After recipe generation, subtract used quantities from local pantry inventory.
@@ -518,6 +644,29 @@ def:pub app -> JsxElement {
                     <h3>Macro Needs</h3>
                     <pre style={{"background": "#0f172a", "color": "#d1fae5", "padding": "10px", "borderRadius": "8px", "marginTop": "10px", "overflowX": "auto"}}>
                         {JSON.stringify(macro_needs, None, 2)}
+                    </pre>
+                </div>
+                <div
+                    style={{
+                        "background": "#ffffffd9",
+                        "border": "1px solid #d9e2ef",
+                        "borderRadius": "14px",
+                        "padding": "16px"
+                    }}
+                >
+                    <h2>Receipt OCR Import</h2>
+                    <div style={{"display": "flex", "gap": "10px", "alignItems": "center", "flexWrap": "wrap"}}>
+                        <input type="file" accept="image/*" onChange={on_receipt_image_change} />
+                        <button onClick={import_receipt_to_pantry}>OCR Import To Pantry</button>
+                        <span>{receipt_image_name}</span>
+                    </div>
+                    <h3>OCR Text</h3>
+                    <pre style={{"background": "#0f172a", "color": "#bfdbfe", "padding": "10px", "borderRadius": "8px", "marginTop": "10px", "overflowX": "auto", "maxHeight": "180px", "overflowY": "auto"}}>
+                        {receipt_ocr_text}
+                    </pre>
+                    <h3>Parsed Receipt Items</h3>
+                    <pre style={{"background": "#0f172a", "color": "#fde68a", "padding": "10px", "borderRadius": "8px", "marginTop": "10px", "overflowX": "auto"}}>
+                        {JSON.stringify(receipt_parse, None, 2)}
                     </pre>
                 </div>
                 <div

@@ -10,7 +10,8 @@ byllm==0.4.18
 # OCR pipeline
 numpy==2.1.3
 opencv-python-headless==4.10.0.84
-easyocr==1.7.2
+paddleocr==2.8.1
+paddlepaddle==2.6.2
 
 # Dev file watcher (matches jac.toml dev-dependencies)
 watchdog==4.0.2

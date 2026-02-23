@@ -25,6 +25,7 @@ import from ingredient {
     GenerateRecipeFromPantry,
     ListGeneratedRecipe,
     ClearGeneratedRecipe,
+    ParseReceiptImageToPantry,
     ParseReceiptTextToPantry
 }
 import from receipt {

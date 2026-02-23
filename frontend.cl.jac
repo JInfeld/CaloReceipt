@@ -74,26 +74,6 @@ def:pub app -> JsxElement {
         survey_response: dict = {},
         survey_step: int = 0;
 
-    has active_tab: str = "console",
-        survey_user_id: str = "",
-        survey_name: str = "",
-        survey_age: str = "",
-        survey_sex: str = "MALE",
-        survey_height: str = "",
-        survey_weight: str = "",
-        survey_goal: str = "MUSCLE_GAIN",
-        survey_fitness_level: str = "MODERATELY_ACTIVE",
-        survey_cooking_days: str = "4",
-        survey_meals_per_day: str = "3",
-        survey_budget: str = "medium",
-        survey_time_minutes: str = "30",
-        survey_skill: str = "intermediate",
-        survey_dietary_notes: str = "",
-        survey_allergy_notes: str = "",
-        survey_dislikes: str = "",
-        survey_response: dict = {},
-        survey_step: int = 0;
-
     # Parse numeric text inputs safely to prevent NaN payloads.
     def to_num(value: str, fallback: float = 0.0) -> float {
         parsed = parseFloat(value);
@@ -198,7 +178,7 @@ def:pub app -> JsxElement {
         return raw_result;
     }
 
-    def has_parse_content(candidate: any) -> bool {
+    def has_parse_content(candidate: dict) -> bool {
         if not candidate {
             return false;
         }
@@ -257,7 +237,7 @@ def:pub app -> JsxElement {
     }
 
     # Unwrap nested OCR payload variants into a consistent shape.
-    def has_ocr_content(candidate: any) -> bool {
+    def has_ocr_content(candidate: dict) -> bool {
         if not candidate {
             return false;
         }
@@ -850,8 +830,9 @@ def:pub app -> JsxElement {
 
             parsed_items: list = [];
             try {
-                if parse_out.items and parse_out.items.length >= 0 {
-                    parsed_items = parse_out.items;
+                parsed_items_raw = parse_out["items"];
+                if parsed_items_raw and parsed_items_raw.length >= 0 {
+                    parsed_items = parsed_items_raw;
                 }
             } except Exception as _e {
                 parsed_items = [];
@@ -1741,6 +1722,74 @@ def:pub app -> JsxElement {
                             <pre style={{"background": "#0f172a", "color": "#fde68a", "padding": "10px", "borderRadius": "8px", "marginTop": "10px", "overflowX": "auto"}}>
                                 {JSON.stringify(receipt_parse, None, 2)}
                             </pre>
+                            <h3>Review Parsed Items Before Add</h3>
+                            <div style={{"display": "flex", "gap": "8px", "marginBottom": "8px", "flexWrap": "wrap"}}>
+                                <button onClick={add_approved_receipt_items_to_pantry}>Add Approved Items</button>
+                                <button onClick={lambda -> None { pending_receipt_items = []; }}>Discard Review Items</button>
+                            </div>
+                            {(
+                                <div>No pending receipt items.</div>
+                            )
+                            if pending_receipt_items.length == 0
+                            else (
+                                <table style={{"width": "100%", "borderCollapse": "collapse"}}>
+                                    <thead>
+                                        <tr>
+                                            <th>Add</th><th>Name</th><th>Qty</th><th>Unit</th><th>Cost</th><th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {pending_receipt_items.map(
+                                            lambda item: dict -> JsxElement { return
+                                                <tr key={item.row_id.toString()}>
+                                                    <td>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={item.include}
+                                                            onChange={lambda e: any -> None { toggle_pending_include(item.row_id, e.target.checked); }}
+                                                        />
+                                                    </td>
+                                                    <td>
+                                                        <input
+                                                            value={item.name}
+                                                            onChange={lambda e: any -> None { update_pending_name(item.row_id, e.target.value); }}
+                                                        />
+                                                    </td>
+                                                    <td>
+                                                        <input
+                                                            value={item.quantity_text}
+                                                            onChange={lambda e: any -> None { update_pending_quantity(item.row_id, e.target.value); }}
+                                                        />
+                                                    </td>
+                                                    <td>
+                                                        <select
+                                                            value={item.unit}
+                                                            onChange={lambda e: any -> None { update_pending_unit(item.row_id, e.target.value); }}
+                                                        >
+                                                            <option value="PIECE">PIECE</option>
+                                                            <option value="LB">LB</option>
+                                                            <option value="OZ">OZ</option>
+                                                            <option value="CUP">CUP</option>
+                                                            <option value="TBSP">TBSP</option>
+                                                            <option value="TSP">TSP</option>
+                                                            <option value="CLOVE">CLOVE</option>
+                                                            <option value="BUNCH">BUNCH</option>
+                                                        </select>
+                                                    </td>
+                                                    <td>
+                                                        <input
+                                                            value={item.cost_text}
+                                                            onChange={lambda e: any -> None { update_pending_cost(item.row_id, e.target.value); }}
+                                                        />
+                                                    </td>
+                                                    <td>
+                                                        <button onClick={lambda -> None { remove_pending_item(item.row_id); }}>Remove</button>
+                                                    </td>
+                                                </tr>; }
+                                        )}
+                                    </tbody>
+                                </table>
+                            )}
                         </div>
                         <div
                             style={{

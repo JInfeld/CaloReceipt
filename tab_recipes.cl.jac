@@ -8,7 +8,7 @@ sv import from user {
     GenerateUserMacroNeeds
 }
 
-def:pub RecipesTab() -> JsxElement {
+def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
     has filter_mode: str = "all";
     has loading: bool = false;
     has status_text: str = "Recipe API ready.";
@@ -32,7 +32,6 @@ def:pub RecipesTab() -> JsxElement {
         }
     ];
 
-    has pantry_items: list = [];
     has pantry_name: str = "";
     has pantry_quantity: str = "1";
     has pantry_unit: str = "PIECE";
@@ -67,6 +66,13 @@ def:pub RecipesTab() -> JsxElement {
             return fallback;
         }
         return parsed;
+    }
+
+    def pantry_items_ref() -> list {
+        if not shared_state.pantry_items {
+            shared_state.pantry_items = [];
+        }
+        return shared_state.pantry_items;
     }
 
     def visible_recipes() -> list {
@@ -160,7 +166,7 @@ def:pub RecipesTab() -> JsxElement {
             return;
         }
 
-        pantry_items = pantry_items.concat([{
+        shared_state.pantry_items = pantry_items_ref().concat([{
             "name": pantry_name.trim(),
             "quantity": to_num(pantry_quantity, 1.0),
             "unit": pantry_unit,
@@ -181,7 +187,7 @@ def:pub RecipesTab() -> JsxElement {
     }
 
     def remove_pantry_item(name: str) -> None {
-        pantry_items = pantry_items.filter(
+        shared_state.pantry_items = pantry_items_ref().filter(
             lambda item: dict -> bool { return item.name != name; }
         );
     }
@@ -201,7 +207,7 @@ def:pub RecipesTab() -> JsxElement {
     }
 
     async def generate_recipe_api() -> None {
-        if pantry_items.length == 0 {
+        if pantry_items_ref().length == 0 {
             status_text = "Add pantry items before generating recipe.";
             return;
         }
@@ -225,7 +231,7 @@ def:pub RecipesTab() -> JsxElement {
 
             recipe_result = root spawn GenerateRecipeFromPantry(
                 profile=profile_out,
-                pantry_ingredients=pantry_items
+                pantry_ingredients=pantry_items_ref()
             );
             recipe_out = first_report_payload(recipe_result);
             if recipe_out.ok == false {
@@ -342,7 +348,7 @@ def:pub RecipesTab() -> JsxElement {
 
                     {(
                         <div style={{"opacity": "0.75"}}>No pantry items yet.</div>
-                    ) if pantry_items.length == 0 else (
+                    ) if pantry_items_ref().length == 0 else (
                         <table style={{"width": "100%", "borderCollapse": "collapse"}}>
                             <thead>
                                 <tr>
@@ -350,7 +356,7 @@ def:pub RecipesTab() -> JsxElement {
                                 </tr>
                             </thead>
                             <tbody>
-                                {pantry_items.map(
+                                {pantry_items_ref().map(
                                     lambda item: dict -> JsxElement { return
                                         <tr key={item.name}>
                                             <td>{item.name}</td>

@@ -15,6 +15,11 @@ jac-client-node = "1.0.4"
 [dev-dependencies]
 watchdog = ">=3.0.0"
 
+[jacpack]
+name = "CaloReceipt"
+description = "A brief description of what this template provides"
+jaclang = "0.10.0"
+
 [serve]
 base_route_app = "app"
 

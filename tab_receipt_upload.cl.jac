@@ -3,9 +3,11 @@ sv import from ingredient {
     ParseReceiptImageToPantry
 }
 
-def:pub ReceiptUploadTab() -> JsxElement {
+def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
     has loading: bool = false;
     has status_text: str = "Upload a receipt image, parse it with API, review items, and add to pantry.";
+    has ocr_last_duration_ms: int = 0;
+    has ocr_timer_display: str = "Last OCR time: --";
 
     has receipt_file_name: str = "";
     has receipt_image_b64: str = "";
@@ -13,8 +15,17 @@ def:pub ReceiptUploadTab() -> JsxElement {
 
     has extracted_text: str = "";
     has parsed_rows: list = [];
-    has pantry_items: list = [];
     has receipt_parse_payload: dict = {};
+
+    def now_ms() -> int {
+        now_obj = Reflect.construct(Date, []);
+        return parseInt(now_obj.getTime().toString());
+    }
+
+    def format_elapsed_label(ms: int) -> str {
+        sec_text = String((ms / 1000.0).toFixed(2));
+        return sec_text.concat("s");
+    }
 
     def first_report_payload(raw_result: dict) -> dict {
         if raw_result.reports and raw_result.reports.length > 0 {
@@ -41,6 +52,13 @@ def:pub ReceiptUploadTab() -> JsxElement {
             return "OZ";
         }
         return "PIECE";
+    }
+
+    def pantry_items_ref() -> list {
+        if not shared_state.pantry_items {
+            shared_state.pantry_items = [];
+        }
+        return shared_state.pantry_items;
     }
 
     def stage_rows_from_items(items: list) -> None {
@@ -144,6 +162,7 @@ def:pub ReceiptUploadTab() -> JsxElement {
 
         loading = true;
         status_text = "Parsing receipt with API...";
+        started_at = now_ms();
         try {
             result = {};
             if receipt_image_b64 {
@@ -169,6 +188,13 @@ def:pub ReceiptUploadTab() -> JsxElement {
             }
 
             stage_rows_from_items(out.items or []);
+            ended_at = now_ms();
+            elapsed_ms = ended_at - started_at;
+            if elapsed_ms < 1 {
+                elapsed_ms = 1;
+            }
+            ocr_last_duration_ms = elapsed_ms;
+            ocr_timer_display = ["Last OCR time: ", format_elapsed_label(ocr_last_duration_ms)].join("");
             status_text = ["API parsed ", String(parsed_rows.length), " items. Edit item name, quantity, and measurement."].join("");
         } except Exception as e {
             status_text = "Receipt parse failed: " + e.toString();
@@ -252,7 +278,7 @@ def:pub ReceiptUploadTab() -> JsxElement {
             return;
         }
 
-        pantry_items = pantry_items.concat(staged);
+        shared_state.pantry_items = pantry_items_ref().concat(staged);
         status_text = ["Added ", String(staged.length), " items to pantry list."].join("");
     }
 
@@ -282,6 +308,7 @@ def:pub ReceiptUploadTab() -> JsxElement {
             <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
                 {[( "Working... " if loading else "Ready. " ), status_text].join("")}
             </div>
+            <div style={{"fontWeight": "600"}}>{ocr_timer_display}</div>
 
             <div style={{"display": "grid", "gridTemplateColumns": "minmax(0, 1fr) minmax(0, 1fr)", "gap": "12px"}}>
                 <div style={{"display": "grid", "gap": "10px"}}>
@@ -352,9 +379,9 @@ def:pub ReceiptUploadTab() -> JsxElement {
                 <h3 style={{"margin": "0"}}>Pantry Preview</h3>
                 {(
                     <div style={{"opacity": "0.75"}}>No pantry items added from receipts yet.</div>
-                ) if pantry_items.length == 0 else (
+                ) if pantry_items_ref().length == 0 else (
                     <div style={{"display": "grid", "gap": "6px"}}>
-                        {pantry_items.map(
+                        {pantry_items_ref().map(
                             lambda item: dict -> JsxElement { return
                                 <div key={[item.name, item.unit, item.quantity].join("-")} style={{"display": "flex", "justifyContent": "space-between", "padding": "8px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#f8fafc"}}>
                                     <span>{item.name}</span>

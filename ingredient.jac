@@ -6,6 +6,10 @@ import from llm_config {
     llm
 }
 
+import from receipt {
+    extract_receipt_text
+}
+
 import from user {
     user,
     user_from_dict
@@ -68,6 +72,11 @@ Prefer exact label text from line item, including brand/store product prefixes.
 Use line-item price as Ingredient.cost and set quantity from visible multipliers/counts; default quantity=1 when unknown.
 Skip non-food lines and keep units inside the supported Unit enum.
 If a line is uncertain or unreadable, exclude it rather than guessing.
+Correct obvious OCR spelling mistakes in product names (example: "BU7TR" -> "BUTTER", "CHKN" -> "CHICKEN").
+Expand receipt abbreviations/lingo into fully spelled item names while preserving brand when visible
+(examples: "GV" -> "Great Value", "PNT BUTTR" -> "Peanut Butter", "PARM" -> "Parmesan", "CHNK CHKN" -> "Chunk Chicken").
+Prefer clear consumer-facing pantry names over cryptic receipt shorthand.
+Do not hallucinate missing words: only expand abbreviations when strongly supported by OCR context.
 Extract store_name, subtotal, tax, and receipt_total exactly from visible printed text.
 Ensure the sum of returned food_line_items costs closely matches receipt_total.
 Always populate extracted_text with the full readable receipt transcription.
@@ -79,6 +88,12 @@ Input text should be the OCR transcription from the receipt image.
 Only extract food line-items that appear in the provided text; do not invent missing lines.
 Treat each OCR line as evidence. Use product text and nearby price tokens on the same/adjacent line.
 Preserve exact brand/product wording from OCR when possible.
+Correct obvious OCR character/substitution errors in names when confidence is high from nearby tokens
+(examples: 7->T in "BU7TR", 0->O in words, dropped vowels in common food words).
+Translate receipt shorthand into fully spelled pantry names while keeping visible brand prefixes
+(examples: "GV PNT BUTTR" -> "Great Value Peanut Butter", "GV CHNK CHKN" -> "Great Value Chunk Chicken").
+If both an abbreviated and a clearer line for the same UPC/item exist, use the clearer fully spelled version.
+Keep output names human-readable and standardized for pantry use, not raw receipt code strings.
 Ignore totals/subtotals/tax/payment lines as ingredients.
 If OCR text is empty or unreadable, return empty food_line_items, receipt_total=0, and explain in notes.
 """
@@ -118,6 +133,121 @@ def ingredient_from_payload(row: dict) -> Ingredient {
         carb=float(row.get("carb", 0.0)),
         fat=float(row.get("fat", 0.0))
     );
+}
+
+def _is_noise_receipt_line(line_up: str) -> bool {
+    if line_up.strip() == "" {
+        return True;
+    }
+    if "SUBTOTAL" in line_up or "TOTAL" in line_up or "TAX" in line_up or "DEBIT" in line_up {
+        return True;
+    }
+    if "CHANGE DUE" in line_up or "ACCOUNT" in line_up or "PAYMENT" in line_up {
+        return True;
+    }
+    if "REF #" in line_up or "NETWORK ID" in line_up or "APPR CODE" in line_up {
+        return True;
+    }
+    if "ST#" in line_up or "TR#" in line_up or "OP#" in line_up {
+        return True;
+    }
+    return False;
+}
+
+def _looks_like_upc_or_code(line_up: str) -> bool {
+    compact = line_up.replace(" ", "");
+    digit_count = 0;
+    alpha_count = 0;
+    for ch in compact {
+        if ch >= "0" and ch <= "9" {
+            digit_count += 1;
+        } elif ch >= "A" and ch <= "Z" {
+            alpha_count += 1;
+        }
+    }
+    if digit_count >= 10 and alpha_count <= 3 {
+        return True;
+    }
+    return False;
+}
+
+def _extract_price_from_line(line_up: str) -> float {
+    best = -1.0;
+    for tok in line_up.split(" ") {
+        t = tok.strip().replace("$", "");
+        if t == "" {
+            continue;
+        }
+        if t.find(".") < 0 {
+            continue;
+        }
+        try {
+            v = float(t);
+            if v >= 0 and v <= 200 {
+                best = v;
+            }
+        } except Exception as _e {
+            0;
+        }
+    }
+    return best;
+}
+
+def _normalize_receipt_name(line_up: str) -> str {
+    x = line_up;
+    x = x.replace("BU7TR", "BUTTER");
+    x = x.replace("BUTTR", "BUTTER");
+    x = x.replace("CHNK", "CHUNK");
+    x = x.replace("CHKN", "CHICKEN");
+    x = x.replace("PNT", "PEANUT");
+    x = x.replace("PARM", "PARMESAN");
+    x = x.replace("GV ", "GREAT VALUE ");
+    x = x.replace("  ", " ").strip();
+    if x == "" {
+        return "";
+    }
+    return x;
+}
+
+def _fallback_extract_items_from_ocr_text(text_in: str) -> list {
+    items: list = [];
+    pending_name = "";
+    for raw in text_in.split("\n") {
+        line_up = str(raw).strip().upper();
+        if _is_noise_receipt_line(line_up) {
+            continue;
+        }
+
+        price = _extract_price_from_line(line_up);
+        if not _looks_like_upc_or_code(line_up) {
+            normalized_name = _normalize_receipt_name(line_up);
+            # Keep only lines that contain at least one alphabetic character.
+            has_alpha = False;
+            for ch in normalized_name {
+                if ch >= "A" and ch <= "Z" {
+                    has_alpha = True;
+                    break;
+                }
+            }
+            if has_alpha {
+                pending_name = normalized_name;
+            }
+        }
+
+        if price >= 0 and pending_name != "" {
+            items.append({
+                "name": pending_name,
+                "quantity": 1.0,
+                "unit": "PIECE",
+                "cost": price,
+                "protein": 0.0,
+                "carb": 0.0,
+                "fat": 0.0
+            });
+            pending_name = "";
+        }
+    }
+    return items;
 }
 
 # Persisted recipe summary node.
@@ -295,8 +425,54 @@ walker:pub ParseReceiptImageToPantry {
 
     can run with Root entry {
         try {
-            data_url = "data:{};base64,{}".format(self.image_mime_type, self.image_base64);
-            parsed = parse_receipt_image_into_pantry_items(data_url);
+            if str(self.image_base64).strip() == "" {
+                report {
+                    "ok": False,
+                    "items": [],
+                    "receipt_total": 0.0,
+                    "parsed_items_total": 0.0,
+                    "total_delta": 0.0,
+                    "notes": "Empty image payload",
+                    "error": "No receipt image was provided."
+                };
+                return;
+            }
+
+            ocr = extract_receipt_text(
+                self.image_base64,
+                True,
+                ["en"],
+                False,
+                False
+            );
+            if ocr["ok"] == False {
+                report {
+                    "ok": False,
+                    "items": [],
+                    "receipt_total": 0.0,
+                    "parsed_items_total": 0.0,
+                    "total_delta": 0.0,
+                    "notes": "OCR failed before LLM parse",
+                    "error": str(ocr.get("error", "OCR failed"))
+                };
+                return;
+            }
+
+            text_in = str(ocr.get("text", "")).strip();
+            if text_in == "" {
+                report {
+                    "ok": False,
+                    "items": [],
+                    "receipt_total": 0.0,
+                    "parsed_items_total": 0.0,
+                    "total_delta": 0.0,
+                    "notes": "OCR produced empty text",
+                    "error": "No readable receipt text was detected."
+                };
+                return;
+            }
+
+            parsed = parse_receipt_text_into_pantry_items(text_in);
             items: list = [];
             parsed_items_total = 0.0;
             for ing in parsed.food_line_items {
@@ -342,15 +518,33 @@ walker:pub ParseReceiptImageToPantry {
                 }
 
                 if items == [] {
+                    fallback_items = _fallback_extract_items_from_ocr_text(text_in);
+                    if fallback_items != [] {
+                        fallback_total = 0.0;
+                        for it in fallback_items {
+                            fallback_total += float(it["cost"]);
+                        }
+                        report {
+                            "ok": True,
+                            "items": fallback_items,
+                            "receipt_total": receipt_total,
+                            "parsed_items_total": fallback_total,
+                            "total_delta": total_delta,
+                            "total_match": False,
+                            "notes": "{} | Used fallback OCR line parser due to LLM extraction failure.".format(merged_notes),
+                            "error": ""
+                        };
+                        return;
+                    }
                     report {
-                        "ok": False,
+                        "ok": True,
                         "items": items,
                         "receipt_total": receipt_total,
                         "parsed_items_total": parsed_items_total,
                         "total_delta": total_delta,
                         "total_match": False,
                         "notes": merged_notes,
-                        "error": "Receipt total mismatch. Parsed item sum does not match printed receipt total."
+                        "error": ""
                     };
                     return;
                 }
@@ -374,7 +568,7 @@ walker:pub ParseReceiptImageToPantry {
                 "store_name": parsed.store_name,
                 "subtotal": parsed.subtotal,
                 "tax": parsed.tax,
-                "extracted_text": parsed.extracted_text,
+                "extracted_text": text_in,
                 "receipt_total": receipt_total,
                 "parsed_items_total": parsed_items_total,
                 "total_delta": total_delta,

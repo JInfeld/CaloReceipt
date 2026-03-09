@@ -6,6 +6,7 @@ import from tab_nutrition { NutritionTab }
 
 def:pub app() -> JsxElement {
     has active_tab: str = "receipt";
+    has app_state: dict = {"pantry_items": []};
 
     def tab_button_style(tab_id: str) -> dict {
         is_active = active_tab == tab_id;
@@ -36,21 +37,6 @@ def:pub app() -> JsxElement {
             return;
         }
         active_tab = "receipt";
-    }
-
-    def active_tab_view() -> JsxElement {
-        if active_tab == "receipt" {
-            return <ReceiptUploadTab />;
-        } elif active_tab == "dashboard" {
-            return <DashboardAiTab />;
-        } elif active_tab == "profile" {
-            return <UserProfileTab />;
-        } elif active_tab == "recipes" {
-            return <RecipesTab />;
-        } elif active_tab == "nutrition" {
-            return <NutritionTab />;
-        }
-        return <ReceiptUploadTab />;
     }
 
     return
@@ -119,7 +105,21 @@ def:pub app() -> JsxElement {
                     </div>
                 </div>
 
-                {active_tab_view()}
+                <div style={{"display": ("block" if active_tab == "receipt" else "none")}}>
+                    <ReceiptUploadTab shared_state={app_state} />
+                </div>
+                <div style={{"display": ("block" if active_tab == "dashboard" else "none")}}>
+                    <DashboardAiTab />
+                </div>
+                <div style={{"display": ("block" if active_tab == "profile" else "none")}}>
+                    <UserProfileTab />
+                </div>
+                <div style={{"display": ("block" if active_tab == "recipes" else "none")}}>
+                    <RecipesTab shared_state={app_state} />
+                </div>
+                <div style={{"display": ("block" if active_tab == "nutrition" else "none")}}>
+                    <NutritionTab />
+                </div>
             </div>
         </div>;
 }

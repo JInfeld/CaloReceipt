@@ -7,6 +7,16 @@ import base64;
 import importlib;
 
 glob _ocr_engine_cache: dict = {};
+glob _module_cache: dict = {};
+
+def _get_module(name: str) -> object {
+    if name in _module_cache {
+        return _module_cache[name];
+    }
+    mod = importlib.import_module(name);
+    _module_cache[name] = mod;
+    return mod;
+}
 
 # Load image from base64 payload or file path.
 def _load_image(image_input: str, is_base64: bool, np: object, cv2: object) -> object {
@@ -98,7 +108,30 @@ def _resize_for_ocr(gray: object, cv2: object) -> object {
     scale = target_w / float(w);
     new_w = int(float(w) * scale);
     new_h = int(float(h) * scale);
-    return cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC);
+    return cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR);
+}
+
+def _resize_color_for_ocr(image: object, cv2: object) -> object {
+    h = int(image.shape[0]);
+    w = int(image.shape[1]);
+    if h <= 0 or w <= 0 {
+        return image;
+    }
+    min_w = 900.0;
+    max_w = 1400.0;
+    target_w = float(w);
+    if float(w) < min_w {
+        target_w = min_w;
+    } elif float(w) > max_w {
+        target_w = max_w;
+    }
+    if target_w == float(w) {
+        return image;
+    }
+    scale = target_w / float(w);
+    new_w = int(float(w) * scale);
+    new_h = int(float(h) * scale);
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR);
 }
 
 # Deskew text block using minAreaRect angle from foreground pixels.
@@ -149,6 +182,17 @@ def _preprocess_receipt(image: object, cv2: object, np: object) -> object {
 
     # Paddle OCR is more stable with 3-channel input arrays.
     return cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR);
+}
+
+def _prepare_for_ocr(image: object, cv2: object, np: object, preprocessed: bool) -> object {
+    if not preprocessed {
+        return _preprocess_receipt(image, cv2, np);
+    }
+
+    # Fast path for frontend-preprocessed payloads: skip crop/denoise/threshold.
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY);
+    gray = _resize_for_ocr(gray, cv2);
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR);
 }
 
 # Build/load a cached PaddleOCR engine.
@@ -270,33 +314,100 @@ def _extract_lines(result: object) -> list {
             if text == "" {
                 continue;
             }
-            lines.append({"text": text, "conf": conf, "y": 0.0, "x": 0.0});
+            x = 0.0;
+            y = 0.0;
+            try {
+                pts = row[0];
+                if isinstance(pts, list) or isinstance(pts, tuple) {
+                    sx = 0.0;
+                    sy = 0.0;
+                    n = 0.0;
+                    for p in pts {
+                        sx += float(p[0]);
+                        sy += float(p[1]);
+                        n += 1.0;
+                    }
+                    if n > 0 {
+                        x = sx / n;
+                        y = sy / n;
+                    }
+                }
+            } except Exception as _e {
+                x = 0.0;
+                y = 0.0;
+            }
+            lines.append({"text": text, "conf": conf, "y": y, "x": x});
         }
     }
 
     # Single-column ordering hint: top-to-bottom then left-to-right.
-    lines.sort(key=lambda r: dict -> float : r["x"]);
-    lines.sort(key=lambda r: dict -> float : r["y"]);
+    lines.sort(key=lambda r: dict -> tuple : (r["y"], r["x"]));
     return lines;
 }
 
-# Public OCR function used by frontend: returns plain text + block metadata.
-def:pub extract_receipt_text(image_input: str, is_base64: bool, languages: list[str]) -> dict {
+def _score_lines(lines: list) -> float {
+    if lines == [] {
+        return -1.0;
+    }
+    conf_sum = 0.0;
+    alpha_lines = 0.0;
+    numeric_heavy = 0.0;
+    count = 0.0;
+    for row in lines {
+        conf_sum += float(row["conf"]);
+        t = str(row["text"]).strip().upper();
+        a = 0.0;
+        d = 0.0;
+        for ch in t {
+            if ch >= "A" and ch <= "Z" {
+                a += 1.0;
+            } elif ch >= "0" and ch <= "9" {
+                d += 1.0;
+            }
+        }
+        if a >= 3 {
+            alpha_lines += 1.0;
+        }
+        if d > a {
+            numeric_heavy += 1.0;
+        }
+        count += 1.0;
+    }
+    avg_conf = conf_sum / count;
+    return (avg_conf * 100.0) + (alpha_lines * 1.8) - (numeric_heavy * 0.9) + min(count, 120.0) * 0.25;
+}
+
+def _run_engine_ocr(engine: object, img: object) -> object {
     try {
-        sys = importlib.import_module("sys");
+        return engine.ocr(img, cls=False);
+    } except Exception as _e {
+        return engine.ocr(img);
+    }
+}
+
+# Public OCR function used by frontend: returns plain text + block metadata.
+def:pub extract_receipt_text(
+    image_input: str,
+    is_base64: bool,
+    languages: list[str],
+    preprocessed: bool = False,
+    include_processed_image: bool = False
+) -> dict {
+    try {
+        sys = _get_module("sys");
 
         missing_text = "";
         missing_count = 0;
 
         try {
-            np = importlib.import_module("numpy");
+            np = _get_module("numpy");
         } except Exception as _e {
             missing_text = "numpy";
             missing_count += 1;
         }
 
         try {
-            cv2 = importlib.import_module("cv2");
+            cv2 = _get_module("cv2");
         } except Exception as _e {
             if missing_text == "" {
                 missing_text = "opencv-python-headless";
@@ -307,7 +418,7 @@ def:pub extract_receipt_text(image_input: str, is_base64: bool, languages: list[
         }
 
         try {
-            importlib.import_module("paddleocr");
+            _get_module("paddleocr");
         } except Exception as _e {
             if missing_text == "" {
                 missing_text = "paddleocr";
@@ -342,43 +453,45 @@ def:pub extract_receipt_text(image_input: str, is_base64: bool, languages: list[
             };
         }
 
-        processed = _preprocess_receipt(image, cv2, np);
+        processed = _prepare_for_ocr(image, cv2, np, preprocessed);
+        resized_original = _resize_color_for_ocr(image, cv2);
         engine = _get_paddle_engine(languages);
 
-        processed_b64 = "";
-        try {
-            enc_out = cv2.imencode(".jpg", processed);
-            ok_enc = enc_out[0];
-            enc_buf = enc_out[1];
-            if ok_enc {
-                processed_b64 = base64.b64encode(enc_buf.tobytes()).decode("utf-8");
-            }
-        } except Exception as _e {
-            processed_b64 = "";
+        variants: list = [];
+        if preprocessed {
+            variants = [{"idx": 0, "img": processed}];
+        } else {
+            variants = [{"idx": 0, "img": resized_original}, {"idx": 1, "img": processed}];
         }
 
-        raw_result = None;
-        try {
-            raw_result = engine.ocr(processed, cls=False);
-        } except Exception as _e {
+        best_lines: list = [];
+        best_variant = -1;
+        best_score = -1.0;
+        best_img = None;
+        for v in variants {
+            raw_result = None;
             try {
-                # Fallback for versions where cls is not a supported arg.
-                raw_result = engine.ocr(processed);
-            } except Exception as _e2 {
-                return {
-                    "ok": False,
-                    "text": "",
-                    "variant_index": -1,
-                    "score": -1.0,
-                    "block_count": 0,
-                    "blocks": [],
-                    "error": "PaddleOCR inference failed: {}".format(str(_e2))
-                };
+                raw_result = _run_engine_ocr(engine, v["img"]);
+            } except Exception as _e {
+                raw_result = None;
+            }
+            if raw_result is None {
+                continue;
+            }
+            lines_try = _extract_lines(raw_result);
+            if lines_try == [] {
+                continue;
+            }
+            score_try = _score_lines(lines_try);
+            if score_try > best_score {
+                best_score = score_try;
+                best_lines = lines_try;
+                best_variant = int(v["idx"]);
+                best_img = v["img"];
             }
         }
 
-        lines = _extract_lines(raw_result);
-        if lines == [] {
+        if best_lines == [] {
             return {
                 "ok": False,
                 "text": "",
@@ -392,11 +505,25 @@ def:pub extract_receipt_text(image_input: str, is_base64: bool, languages: list[
             };
         }
 
+        processed_b64 = "";
+        if include_processed_image and best_img != None {
+            try {
+                enc_out = cv2.imencode(".jpg", best_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75]);
+                ok_enc = enc_out[0];
+                enc_buf = enc_out[1];
+                if ok_enc {
+                    processed_b64 = base64.b64encode(enc_buf.tobytes()).decode("utf-8");
+                }
+            } except Exception as _e {
+                processed_b64 = "";
+            }
+        }
+
         text_accum = "";
         conf_sum = 0.0;
         count = 0.0;
         blocks: list = [];
-        for row in lines {
+        for row in best_lines {
             t = str(row["text"]).strip();
             if t == "" {
                 continue;
@@ -420,7 +547,7 @@ def:pub extract_receipt_text(image_input: str, is_base64: bool, languages: list[
         return {
             "ok": True,
             "text": text_accum,
-            "variant_index": 0,
+            "variant_index": best_variant,
             "score": avg_conf,
             "block_count": int(count),
             "blocks": blocks,
@@ -445,8 +572,16 @@ walker:pub ExtractReceiptText {
     has image_input: str;
     has is_base64: bool = False;
     has languages: list[str] = [];
+    has preprocessed: bool = False;
+    has include_processed_image: bool = False;
 
     can run with Root entry {
-        report extract_receipt_text(self.image_input, self.is_base64, self.languages);
+        report extract_receipt_text(
+            self.image_input,
+            self.is_base64,
+            self.languages,
+            self.preprocessed,
+            self.include_processed_image
+        );
     }
 }

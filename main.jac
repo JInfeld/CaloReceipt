@@ -19,7 +19,13 @@ import from user {
     SaveUserProfile,
     GetUserProfile,
     ClearUserProfile,
-    GenerateUserMacroNeeds
+    GenerateUserMacroNeeds,
+    SavePantryState,
+    GetPantryState,
+    ClearPantryState,
+    SaveNutritionState,
+    GetNutritionState,
+    ClearNutritionState
 }
 import from ingredient {
     GenerateRecipeFromPantry,

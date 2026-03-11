@@ -3,7 +3,7 @@ sv import from user {
     GetUserProfile
 }
 
-def:pub DashboardAiTab() -> JsxElement {
+def:pub DashboardAiTab(on_auth_error: any = None) -> JsxElement {
     has loading: bool = false;
     has status_text: str = "Macro API ready.";
     has macro_needs: dict = {};
@@ -40,6 +40,23 @@ def:pub DashboardAiTab() -> JsxElement {
             return raw_result.result;
         }
         return raw_result;
+    }
+
+    def is_auth_error_text(text: str) -> bool {
+        lower = String(text or "").toLowerCase();
+        return (
+            lower.includes("401") or
+            lower.includes("unauthorized") or
+            lower.includes("forbidden") or
+            lower.includes("token") or
+            lower.includes("auth")
+        );
+    }
+
+    def maybe_trigger_auth_error(text: str) -> None {
+        if on_auth_error and is_auth_error_text(text) {
+            on_auth_error("Session expired. Please sign in again.");
+        }
     }
 
     def macro_percent(consumed: int, target: int) -> int {
@@ -141,6 +158,13 @@ def:pub DashboardAiTab() -> JsxElement {
         try {
             profile_result = root spawn GetUserProfile();
             profile_out = first_report_payload(profile_result);
+            if profile_out and profile_out.error {
+                err_text = String(profile_out.error);
+                status_text = "Profile lookup failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
             if not profile_out or Object.keys(profile_out).length == 0 {
                 status_text = "No saved user profile found. Save one in User Profile tab first.";
                 loading = false;
@@ -162,10 +186,14 @@ def:pub DashboardAiTab() -> JsxElement {
                     "text": "Fresh macro targets loaded. You can now generate a grocery list from the updated gaps."
                 }]);
             } else {
-                status_text = "Macro generation failed: " + String(out.error or "unknown error");
+                err_text = String(out.error or "unknown error");
+                status_text = "Macro generation failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
             }
         } except Exception as e {
-            status_text = "Macro generation failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Macro generation failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }

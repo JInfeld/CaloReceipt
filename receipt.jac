@@ -242,11 +242,7 @@ def _get_paddle_engine(languages: list[str]) -> object {
                 );
             } except Exception as _e3 {
                 # PaddleOCR 2.x CPU fallback.
-                engine = PaddleOCR(
-                    use_angle_cls=True,
-                    lang=lang,
-                    use_gpu=False
-                );
+                engine = PaddleOCR();
             }
         }
     }
@@ -568,7 +564,7 @@ def:pub extract_receipt_text(
     }
 }
 
-walker:pub ExtractReceiptText {
+walker ExtractReceiptText {
     has image_input: str;
     has is_base64: bool = False;
     has languages: list[str] = [];

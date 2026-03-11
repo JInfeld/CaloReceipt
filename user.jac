@@ -16,13 +16,13 @@ enum Goal {
 }
 
 obj user {
-    has user_id: int;
     has age: int;
     has sex: Sex;
     has height: float;
     has weight: float;
     has fitness_level: FitnessLevel;
     has goal: Goal;
+    has username: str = "";
     has dietary_restrictions: list[str] = [];
     has allergies: list[str] = [];
 }
@@ -33,6 +33,7 @@ def:pub user_from_dict(profile: dict) -> user {
     sex_in = str(profile["sex"]).upper();
     fitness_in = str(profile["fitness_level"]).upper();
     goal_in = str(profile["goal"]).upper();
+    username_text = str(profile.get("username", "")).strip();
 
     sex_val = Sex.MALE;
     if sex_in == "FEMALE" {
@@ -66,11 +67,11 @@ def:pub user_from_dict(profile: dict) -> user {
     }
 
     return user(
-        user_id=int(profile["user_id"]),
         age=int(profile["age"]),
         sex=sex_val,
         height=float(profile["height"]),
         weight=float(profile["weight"]),
+        username=username_text,
         dietary_restrictions=profile["dietary_restrictions"],
         allergies=profile["allergies"],
         fitness_level=fitness_val,
@@ -107,21 +108,21 @@ def generate_calorie_macro_needs(profile: user) -> MacroNeeds by llm();
 
 # --- Data Node ---
 node UserProfile {
-    has user_id: int,
-        age: int,
+    has age: int,
         sex: Sex,
         height: float,
         weight: float,
         dietary_restrictions: list[str],
         allergies: list[str],
         fitness_level: FitnessLevel,
-        goal: Goal;
+        goal: Goal,
+        username: str = "";
 }
 
 
 # --- User Walkers ---
 # Upsert a single persistent user profile node in graph storage.
-walker:pub SaveUserProfile {
+walker SaveUserProfile {
     has profile: dict;
 
     can save with Root entry {
@@ -130,7 +131,6 @@ walker:pub SaveUserProfile {
             # Keep only one user profile in the graph.
             visit [-->];
             here ++> UserProfile(
-                user_id=profile_obj.user_id,
                 age=profile_obj.age,
                 sex=profile_obj.sex,
                 height=profile_obj.height,
@@ -138,7 +138,8 @@ walker:pub SaveUserProfile {
                 dietary_restrictions=profile_obj.dietary_restrictions,
                 allergies=profile_obj.allergies,
                 fitness_level=profile_obj.fitness_level,
-                goal=profile_obj.goal
+                goal=profile_obj.goal,
+                username=profile_obj.username
             );
             report {"saved": True};
         } except Exception as e {
@@ -153,7 +154,7 @@ walker:pub SaveUserProfile {
 }
 
 # Load the current persisted profile for frontend display/editing.
-walker:pub GetUserProfile {
+walker GetUserProfile {
     has profile: dict = {};
 
     can collect with Root entry {
@@ -162,11 +163,11 @@ walker:pub GetUserProfile {
 
     can read with UserProfile entry {
         self.profile = {
-            "user_id": here.user_id,
             "age": here.age,
             "sex": str(here.sex).split(".")[-1].lower(),
             "height": here.height,
             "weight": here.weight,
+            "username": here.username,
             "dietary_restrictions": here.dietary_restrictions,
             "allergies": here.allergies,
             "fitness_level": str(here.fitness_level).split(".")[-1].lower(),
@@ -180,7 +181,7 @@ walker:pub GetUserProfile {
 }
 
 # Remove profile state from the graph.
-walker:pub ClearUserProfile {
+walker ClearUserProfile {
     can collect with Root entry {
         visit [-->];
     }
@@ -195,7 +196,7 @@ walker:pub ClearUserProfile {
 }
 
 # Read the persisted profile, call LLM once, and return macro targets.
-walker:pub GenerateUserMacroNeeds {
+walker GenerateUserMacroNeeds {
     has result: dict = {};
     has did_generate: bool = False;
 
@@ -212,11 +213,11 @@ walker:pub GenerateUserMacroNeeds {
         try {
             needs = generate_calorie_macro_needs(
                 user(
-                    user_id=here.user_id,
                     age=here.age,
                     sex=here.sex,
                     height=here.height,
                     weight=here.weight,
+                    username=here.username,
                     dietary_restrictions=here.dietary_restrictions,
                     allergies=here.allergies,
                     fitness_level=here.fitness_level,
@@ -245,5 +246,121 @@ walker:pub GenerateUserMacroNeeds {
             return;
         }
         report self.result;
+    }
+}
+
+# Persisted per-user pantry state.
+node PantryState {
+    has items: list = [];
+}
+
+# Persisted per-user nutrition state.
+node NutritionState {
+    has selected_day_index: int;
+    has weekly_history: list = [];
+}
+
+walker SavePantryState {
+    has items: list;
+
+    can save with Root entry {
+        try {
+            visit [-->];
+            here ++> PantryState(items=self.items);
+            report {"saved": True, "count": len(self.items)};
+        } except Exception as e {
+            report {"saved": False, "error": str(e)};
+        }
+    }
+
+    can clear_old with PantryState entry {
+        del here;
+    }
+}
+
+walker GetPantryState {
+    has items: list = [];
+
+    can collect with Root entry {
+        visit [-->];
+    }
+
+    can read with PantryState entry {
+        self.items = here.items;
+    }
+
+    can done with Root exit {
+        report {"items": self.items};
+    }
+}
+
+walker ClearPantryState {
+    can collect with Root entry {
+        visit [-->];
+    }
+
+    can clear with PantryState entry {
+        del here;
+    }
+
+    can done with Root exit {
+        report {"cleared": True};
+    }
+}
+
+walker SaveNutritionState {
+    has selected_day_index: int;
+    has weekly_history: list;
+
+    can save with Root entry {
+        try {
+            visit [-->];
+            here ++> NutritionState(
+                selected_day_index=self.selected_day_index,
+                weekly_history=self.weekly_history
+            );
+            report {"saved": True};
+        } except Exception as e {
+            report {"saved": False, "error": str(e)};
+        }
+    }
+
+    can clear_old with NutritionState entry {
+        del here;
+    }
+}
+
+walker GetNutritionState {
+    has selected_day_index: int = 0;
+    has weekly_history: list = [];
+
+    can collect with Root entry {
+        visit [-->];
+    }
+
+    can read with NutritionState entry {
+        self.selected_day_index = here.selected_day_index;
+        self.weekly_history = here.weekly_history;
+    }
+
+    can done with Root exit {
+        report {
+            "selected_day_index": self.selected_day_index,
+            "weekly_history": self.weekly_history
+        };
+    }
+}
+
+walker ClearNutritionState {
+    can collect with Root entry {
+        visit [-->];
+    }
+
+    can clear with NutritionState entry {
+        del here;
+    }
+
+    can done with Root exit {
+        report {"cleared": True};
     }
 }

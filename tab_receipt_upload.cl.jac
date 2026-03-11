@@ -3,7 +3,11 @@ sv import from ingredient {
     ParseReceiptImageToPantry
 }
 
-def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
+def:pub ReceiptUploadTab(
+    shared_state: dict = {},
+    on_auth_error: any = None,
+    on_pantry_change: any = None
+) -> JsxElement {
     has loading: bool = false;
     has status_text: str = "Upload a receipt image, parse it with API, review items, and add to pantry.";
     has ocr_last_duration_ms: int = 0;
@@ -43,6 +47,23 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
         return raw_result;
     }
 
+    def is_auth_error_text(text: str) -> bool {
+        lower = String(text or "").toLowerCase();
+        return (
+            lower.includes("401") or
+            lower.includes("unauthorized") or
+            lower.includes("forbidden") or
+            lower.includes("token") or
+            lower.includes("auth")
+        );
+    }
+
+    def maybe_trigger_auth_error(text: str) -> None {
+        if on_auth_error and is_auth_error_text(text) {
+            on_auth_error("Session expired. Please sign in again.");
+        }
+    }
+
     def normalize_unit(raw: str) -> str {
         text = String(raw).trim().toUpperCase();
         if text == "LB" {
@@ -55,10 +76,17 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
     }
 
     def pantry_items_ref() -> list {
-        if not shared_state.pantry_items {
+        if not shared_state.pantry_items or not Array.isArray(shared_state.pantry_items) {
             shared_state.pantry_items = [];
         }
         return shared_state.pantry_items;
+    }
+
+    async def set_pantry_items(items: list) -> None {
+        shared_state.pantry_items = items;
+        if on_pantry_change {
+            await on_pantry_change(items);
+        }
     }
 
     def stage_rows_from_items(items: list) -> None {
@@ -178,7 +206,9 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
             receipt_parse_payload = out;
 
             if out.ok == false {
-                status_text = "Receipt parse failed: " + String(out.error or "unknown error");
+                err_text = String(out.error or "unknown error");
+                status_text = "Receipt parse failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
                 loading = false;
                 return;
             }
@@ -197,7 +227,9 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
             ocr_timer_display = ["Last OCR time: ", format_elapsed_label(ocr_last_duration_ms)].join("");
             status_text = ["API parsed ", String(parsed_rows.length), " items. Edit item name, quantity, and measurement."].join("");
         } except Exception as e {
-            status_text = "Receipt parse failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Receipt parse failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
@@ -259,7 +291,7 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
         );
     }
 
-    def add_to_pantry() -> None {
+    async def add_to_pantry() -> None {
         staged: list = [];
         for row in parsed_rows {
             row_name = row.name.trim();
@@ -278,7 +310,7 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
             return;
         }
 
-        shared_state.pantry_items = pantry_items_ref().concat(staged);
+        await set_pantry_items(pantry_items_ref().concat(staged));
         status_text = ["Added ", String(staged.length), " items to pantry list."].join("");
     }
 

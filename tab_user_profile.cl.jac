@@ -4,12 +4,11 @@ sv import from user {
     ClearUserProfile
 }
 
-def:pub UserProfileTab() -> JsxElement {
+def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None) -> JsxElement {
     has survey_step: int = 0;
     has loading: bool = false;
     has status_text: str = "Profile not saved yet.";
 
-    has user_id: str = "";
     has username: str = "";
     has pax: str = "1";
     has age: str = "";
@@ -23,16 +22,6 @@ def:pub UserProfileTab() -> JsxElement {
     has dietary_notes: str = "";
     has allergy_notes: str = "";
     has saved_profile: dict = {};
-
-    def ensure_user_id() -> None {
-        if user_id.trim() {
-            return;
-        }
-        now_obj = Reflect.construct(Date, []);
-        epoch_text = now_obj.getTime().toString();
-        rand_text = Math.floor(Math.random() * 1000).toString();
-        user_id = [epoch_text, rand_text].join("");
-    }
 
     def split_csv(text: str) -> list {
         if not text.trim() {
@@ -54,8 +43,6 @@ def:pub UserProfileTab() -> JsxElement {
     }
 
     def build_profile_payload() -> dict {
-        ensure_user_id();
-
         age_num = parseInt(age.trim());
         height_num = parse_num(height, -1.0);
         weight_num = parse_num(weight, -1.0);
@@ -65,7 +52,7 @@ def:pub UserProfileTab() -> JsxElement {
         }
 
         return {
-            "user_id": parseInt(user_id),
+            "username": username.trim(),
             "age": age_num,
             "sex": sex,
             "height": height_num,
@@ -91,6 +78,23 @@ def:pub UserProfileTab() -> JsxElement {
             return raw_result.result;
         }
         return raw_result;
+    }
+
+    def is_auth_error_text(text: str) -> bool {
+        lower = String(text or "").toLowerCase();
+        return (
+            lower.includes("401") or
+            lower.includes("unauthorized") or
+            lower.includes("forbidden") or
+            lower.includes("token") or
+            lower.includes("auth")
+        );
+    }
+
+    def maybe_trigger_auth_error(text: str) -> None {
+        if on_auth_error and is_auth_error_text(text) {
+            on_auth_error("Session expired. Please sign in again.");
+        }
     }
 
     def step_title() -> str {
@@ -129,11 +133,18 @@ def:pub UserProfileTab() -> JsxElement {
             if out.saved {
                 saved_profile = payload;
                 status_text = "Profile saved to backend.";
+                if on_profile_change {
+                    on_profile_change(payload);
+                }
             } else {
-                status_text = "Save failed: " + String(out.error or JSON.stringify(out, None, 2));
+                err_text = String(out.error or JSON.stringify(out, None, 2));
+                status_text = "Save failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
             }
         } except Exception as e {
-            status_text = "Save failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Save failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
@@ -144,6 +155,13 @@ def:pub UserProfileTab() -> JsxElement {
         try {
             result = root spawn GetUserProfile();
             out = first_report_payload(result);
+            if out and out.error {
+                err_text = String(out.error);
+                status_text = "Load failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
             if not out or Object.keys(out).length == 0 {
                 status_text = "No saved profile found.";
                 saved_profile = {};
@@ -152,8 +170,7 @@ def:pub UserProfileTab() -> JsxElement {
             }
 
             saved_profile = out;
-            ensure_user_id();
-            user_id = String(out.user_id);
+            username = String(out.username or "");
             age = String(out.age);
             height = String(out.height);
             weight = String(out.weight);
@@ -163,8 +180,13 @@ def:pub UserProfileTab() -> JsxElement {
             dietary_notes = (out.dietary_restrictions or []).join(", ");
             allergy_notes = (out.allergies or []).join(", ");
             status_text = "Profile loaded from backend.";
+            if on_profile_change {
+                on_profile_change(out);
+            }
         } except Exception as e {
-            status_text = "Load failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Load failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
@@ -175,20 +197,26 @@ def:pub UserProfileTab() -> JsxElement {
         try {
             root spawn ClearUserProfile();
             saved_profile = {};
+            username = "";
             age = "";
             height = "";
             weight = "";
             dietary_notes = "";
             allergy_notes = "";
             status_text = "Profile cleared from backend.";
+            if on_profile_change {
+                on_profile_change({});
+            }
         } except Exception as e {
-            status_text = "Clear failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Clear failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
 
-    can with entry {
-        ensure_user_id();
+    async can with entry {
+        await load_profile_api();
     }
 
     return
@@ -230,7 +258,6 @@ def:pub UserProfileTab() -> JsxElement {
 
                     {(
                         <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(180px, 1fr))", "gap": "10px"}}>
-                            <div><label>User ID</label><input value={user_id} onChange={lambda e: any -> None { user_id = e.target.value; }} placeholder="auto-generated" /></div>
                             <div><label>Username</label><input value={username} onChange={lambda e: any -> None { username = e.target.value; }} placeholder="username" /></div>
                             <div><label>Household / Pax</label><input value={pax} onChange={lambda e: any -> None { pax = e.target.value; }} placeholder="1" /></div>
                             <div><label>Age</label><input value={age} onChange={lambda e: any -> None { age = e.target.value; }} placeholder="age" /></div>
@@ -286,7 +313,6 @@ def:pub UserProfileTab() -> JsxElement {
 
                     {(
                         <div style={{"display": "grid", "gap": "8px"}}>
-                            <div style={{"padding": "8px", "border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "10px"}}><b>User ID:</b> {user_id}</div>
                             <div style={{"padding": "8px", "border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "10px"}}><b>Username:</b> {username if username.trim() else "-"}</div>
                             <div style={{"padding": "8px", "border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "10px"}}><b>Pax:</b> {pax}</div>
                             <div style={{"padding": "8px", "border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "10px"}}><b>Height / Weight:</b> {height} in / {weight} lb</div>

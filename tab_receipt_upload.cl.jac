@@ -8,6 +8,8 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
     has status_text: str = "Upload a receipt image, parse it with API, review items, and add to pantry.";
     has ocr_last_duration_ms: int = 0;
     has ocr_timer_display: str = "Last OCR time: --";
+    has request_counter: int = 0;
+    has receipt_debug_events: list = [];
 
     has receipt_file_name: str = "";
     has receipt_image_b64: str = "";
@@ -59,6 +61,46 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
             shared_state.pantry_items = [];
         }
         return shared_state.pantry_items;
+    }
+
+    def add_debug(event_name: str, payload: dict = {}) -> None {
+        receipt_debug_events = ([{
+            "ts_ms": now_ms(),
+            "event": event_name,
+            "payload": payload
+        }]).concat(receipt_debug_events).slice(0, 80);
+    }
+
+    def reset_receipt_parse_state(clear_file: bool = False, clear_text: bool = False) -> None {
+        if clear_text {
+            extracted_text = "";
+        }
+        parsed_rows = [];
+        receipt_parse_payload = {};
+        if clear_file {
+            receipt_file_name = "";
+            receipt_image_b64 = "";
+            receipt_image_mime_type = "image/jpeg";
+        }
+    }
+
+    async def post_walker_with_timeout(walker_name: str, payload: dict) -> dict {
+        resp = await fetch(
+            "/walker/".concat(walker_name),
+            {
+                "method": "POST",
+                "headers": {"Content-Type": "application/json"},
+                "body": JSON.stringify(payload)
+            }
+        );
+        if not resp.ok {
+            return {
+                "ok": False,
+                "stage": "http",
+                "error": ["HTTP ", String(resp.status), " ", walker_name].join("")
+            };
+        }
+        return await resp.json();
     }
 
     def stage_rows_from_items(items: list) -> None {
@@ -155,30 +197,48 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
     }
 
     async def parse_receipt_api() -> None {
+        if loading {
+            return;
+        }
         if not receipt_image_b64 and not extracted_text.trim() {
             status_text = "Provide either an image upload or receipt text to parse.";
             return;
         }
 
+        request_counter += 1;
+        req_id = ["receipt-", String(now_ms()), "-", String(request_counter)].join("");
         loading = true;
-        status_text = "Parsing receipt with API...";
+        status_text = "Running OCR and parser...";
+        text_input = extracted_text;
+        reset_receipt_parse_state(False, False);
+        add_debug("parse:start", {"request_id": req_id, "has_image": (receipt_image_b64 != ""), "has_text": (extracted_text.trim() != "")});
         started_at = now_ms();
         try {
             result = {};
             if receipt_image_b64 {
-                result = root spawn ParseReceiptImageToPantry(
-                    image_base64=receipt_image_b64,
-                    image_mime_type=receipt_image_mime_type
+                status_text = "Running OCR...";
+                result = await post_walker_with_timeout(
+                    "ParseReceiptImageToPantry",
+                    {
+                        "image_base64": receipt_image_b64,
+                        "image_mime_type": receipt_image_mime_type
+                    }
                 );
             } else {
-                result = root spawn ParseReceiptTextToPantry(receipt_text=extracted_text);
+                status_text = "Running parser...";
+                result = await post_walker_with_timeout(
+                    "ParseReceiptTextToPantry",
+                    {"receipt_text": text_input}
+                );
             }
 
             out = first_report_payload(result);
             receipt_parse_payload = out;
+            add_debug("parse:response", {"request_id": req_id, "ok": out.ok, "stage": out.stage, "diagnostics": out.diagnostics});
 
             if out.ok == false {
-                status_text = "Receipt parse failed: " + String(out.error or "unknown error");
+                stage_name = String(out.stage or "pipeline");
+                status_text = ["Receipt ", stage_name, " failed: ", String(out.error or "unknown error")].join("");
                 loading = false;
                 return;
             }
@@ -193,11 +253,26 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
             if elapsed_ms < 1 {
                 elapsed_ms = 1;
             }
-            ocr_last_duration_ms = elapsed_ms;
+            try {
+                if out.diagnostics and out.diagnostics.ocr_ms and out.diagnostics.ocr_ms > 0 {
+                    ocr_last_duration_ms = parseInt(String(out.diagnostics.ocr_ms));
+                } else {
+                    ocr_last_duration_ms = elapsed_ms;
+                }
+            } except Exception as _e {
+                ocr_last_duration_ms = elapsed_ms;
+            }
             ocr_timer_display = ["Last OCR time: ", format_elapsed_label(ocr_last_duration_ms)].join("");
-            status_text = ["API parsed ", String(parsed_rows.length), " items. Edit item name, quantity, and measurement."].join("");
+            status_text = ["API parsed ", String((out.items or []).length), " items. Edit item name, quantity, and measurement."].join("");
+            add_debug("parse:success", {"request_id": req_id, "item_count": String((out.items or []).length), "ocr_ms": ocr_last_duration_ms});
         } except Exception as e {
-            status_text = "Receipt parse failed: " + e.toString();
+            err_text = e.toString();
+            if String(err_text).includes("AbortError") {
+                status_text = "Receipt parse timed out. Try again or use Parse From Raw Text.";
+            } else {
+                status_text = "Receipt parse failed: " + err_text;
+            }
+            add_debug("parse:error", {"request_id": req_id, "error": err_text});
         }
         loading = false;
     }
@@ -279,7 +354,9 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
         }
 
         shared_state.pantry_items = pantry_items_ref().concat(staged);
-        status_text = ["Added ", String(staged.length), " items to pantry list."].join("");
+        reset_receipt_parse_state(True, True);
+        status_text = ["Added ", String(staged.length), " items to pantry list. Upload next receipt."].join("");
+        add_debug("pantry:add", {"added_count": String(staged.length), "pantry_size": String(pantry_items_ref().length)});
     }
 
     return
@@ -323,6 +400,7 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
                     <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
                         <button
                             onClick={parse_receipt_api}
+                            disabled={loading}
                             style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#dbeafe", "fontWeight": "700"}}
                         >
                             Parse Receipt (API)
@@ -341,11 +419,19 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
                     <pre style={{"margin": "0", "background": "#0f172a", "color": "#e2e8f0", "borderRadius": "10px", "padding": "10px", "overflowX": "auto", "maxHeight": "220px", "overflowY": "auto"}}>{JSON.stringify(receipt_parse_payload, None, 2)}</pre>
                     <button
                         onClick={add_to_pantry}
+                        disabled={loading}
                         style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #0f766e", "background": "#ccfbf1", "fontWeight": "700", "width": "fit-content"}}
                     >
                         Add Items To Pantry
                     </button>
                 </div>
+            </div>
+
+            <div style={{"background": "#fff7ed", "border": "1px solid #fdba74", "borderRadius": "12px", "padding": "10px"}}>
+                <h3 style={{"margin": "0 0 8px 0"}}>Receipt Debug (latest 80)</h3>
+                <pre style={{"margin": "0", "background": "#111827", "color": "#fde68a", "borderRadius": "10px", "padding": "10px", "overflowX": "auto", "maxHeight": "180px", "overflowY": "auto"}}>
+                    {JSON.stringify(receipt_debug_events, None, 2)}
+                </pre>
             </div>
 
             <div style={{"display": "grid", "gap": "10px"}}>

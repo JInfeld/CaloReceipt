@@ -5,6 +5,8 @@ Generate a recipe from a user profile and available pantry ingredients.
 import from llm_config {
     llm
 }
+import time;
+import uuid;
 
 import from receipt {
     extract_receipt_text
@@ -133,6 +135,19 @@ def ingredient_from_payload(row: dict) -> Ingredient {
         carb=float(row.get("carb", 0.0)),
         fat=float(row.get("fat", 0.0))
     );
+}
+
+def _now_ms() -> int {
+    return int(time.time() * 1000.0);
+}
+
+def _diag_payload(request_id: str, start_ms: int, ocr_ms: int = -1, llm_ms: int = -1) -> dict {
+    return {
+        "request_id": request_id,
+        "ocr_ms": ocr_ms,
+        "llm_ms": llm_ms,
+        "total_ms": _now_ms() - start_ms
+    };
 }
 
 def _is_noise_receipt_line(line_up: str) -> bool {
@@ -425,9 +440,15 @@ walker:pub ParseReceiptImageToPantry {
 
     can run with Root entry {
         try {
+            request_id = str(uuid.uuid4());
+            started_ms = _now_ms();
+            ocr_ms = -1;
+            llm_ms = -1;
             if str(self.image_base64).strip() == "" {
                 report {
                     "ok": False,
+                    "stage": "validation",
+                    "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                     "items": [],
                     "receipt_total": 0.0,
                     "parsed_items_total": 0.0,
@@ -438,6 +459,8 @@ walker:pub ParseReceiptImageToPantry {
                 return;
             }
 
+            print("[ParseReceiptImageToPantry] request_id={} stage=ocr:start".format(request_id));
+            ocr_started_ms = _now_ms();
             ocr = extract_receipt_text(
                 self.image_base64,
                 True,
@@ -445,9 +468,13 @@ walker:pub ParseReceiptImageToPantry {
                 False,
                 False
             );
+            ocr_ms = _now_ms() - ocr_started_ms;
+            print("[ParseReceiptImageToPantry] request_id={} stage=ocr:end ocr_ms={}".format(request_id, ocr_ms));
             if ocr["ok"] == False {
                 report {
                     "ok": False,
+                    "stage": "ocr",
+                    "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                     "items": [],
                     "receipt_total": 0.0,
                     "parsed_items_total": 0.0,
@@ -462,6 +489,8 @@ walker:pub ParseReceiptImageToPantry {
             if text_in == "" {
                 report {
                     "ok": False,
+                    "stage": "ocr",
+                    "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                     "items": [],
                     "receipt_total": 0.0,
                     "parsed_items_total": 0.0,
@@ -472,7 +501,50 @@ walker:pub ParseReceiptImageToPantry {
                 return;
             }
 
-            parsed = parse_receipt_text_into_pantry_items(text_in);
+            print("[ParseReceiptImageToPantry] request_id={} stage=llm:start".format(request_id));
+            llm_started_ms = _now_ms();
+            parsed = None;
+            try {
+                parsed = parse_receipt_text_into_pantry_items(text_in);
+            } except Exception as llm_e {
+                llm_ms = _now_ms() - llm_started_ms;
+                print("[ParseReceiptImageToPantry] request_id={} stage=llm:error llm_ms={} err={}".format(request_id, llm_ms, str(llm_e)));
+                fallback_items = _fallback_extract_items_from_ocr_text(text_in);
+                if fallback_items != [] {
+                    fallback_total = 0.0;
+                    for it in fallback_items {
+                        fallback_total += float(it["cost"]);
+                    }
+                    report {
+                        "ok": True,
+                        "stage": "llm_fallback",
+                        "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
+                        "items": fallback_items,
+                        "store_name": "",
+                        "subtotal": 0.0,
+                        "tax": 0.0,
+                        "extracted_text": text_in,
+                        "receipt_total": 0.0,
+                        "parsed_items_total": fallback_total,
+                        "total_delta": fallback_total,
+                        "total_match": False,
+                        "notes": "LLM parse failed; fallback OCR line parser was used.",
+                        "error": ""
+                    };
+                    return;
+                }
+                report {
+                    "ok": False,
+                    "stage": "llm",
+                    "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
+                    "items": [],
+                    "extracted_text": text_in,
+                    "error": str(llm_e)
+                };
+                return;
+            }
+            llm_ms = _now_ms() - llm_started_ms;
+            print("[ParseReceiptImageToPantry] request_id={} stage=llm:end llm_ms={}".format(request_id, llm_ms));
             items: list = [];
             parsed_items_total = 0.0;
             for ing in parsed.food_line_items {
@@ -526,6 +598,8 @@ walker:pub ParseReceiptImageToPantry {
                         }
                         report {
                             "ok": True,
+                            "stage": "llm_fallback",
+                            "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                             "items": fallback_items,
                             "receipt_total": receipt_total,
                             "parsed_items_total": fallback_total,
@@ -538,6 +612,8 @@ walker:pub ParseReceiptImageToPantry {
                     }
                     report {
                         "ok": True,
+                        "stage": "llm",
+                        "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                         "items": items,
                         "receipt_total": receipt_total,
                         "parsed_items_total": parsed_items_total,
@@ -551,6 +627,8 @@ walker:pub ParseReceiptImageToPantry {
 
                 report {
                     "ok": True,
+                    "stage": "llm",
+                    "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                     "items": items,
                     "receipt_total": receipt_total,
                     "parsed_items_total": parsed_items_total,
@@ -564,6 +642,8 @@ walker:pub ParseReceiptImageToPantry {
 
             report {
                 "ok": True,
+                "stage": "llm",
+                "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                 "items": items,
                 "store_name": parsed.store_name,
                 "subtotal": parsed.subtotal,
@@ -578,6 +658,7 @@ walker:pub ParseReceiptImageToPantry {
         } except Exception as e {
             report {
                 "ok": False,
+                "stage": "server",
                 "items": [],
                 "error": str(e)
             };

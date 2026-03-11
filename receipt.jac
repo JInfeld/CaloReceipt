@@ -5,9 +5,11 @@ Uses PaddleOCR in document mode plus receipt-specific preprocessing.
 import os;
 import base64;
 import importlib;
+import hashlib;
 
 glob _ocr_engine_cache: dict = {};
 glob _module_cache: dict = {};
+glob _ocr_result_cache: dict = {};
 
 def _get_module(name: str) -> object {
     if name in _module_cache {
@@ -91,8 +93,8 @@ def _resize_for_ocr(gray: object, cv2: object) -> object {
         return gray;
     }
 
-    min_w = 900.0;
-    max_w = 1400.0;
+    min_w = 700.0;
+    max_w = 1050.0;
     target_w = float(w);
 
     if float(w) < min_w {
@@ -117,8 +119,8 @@ def _resize_color_for_ocr(image: object, cv2: object) -> object {
     if h <= 0 or w <= 0 {
         return image;
     }
-    min_w = 900.0;
-    max_w = 1400.0;
+    min_w = 700.0;
+    max_w = 1050.0;
     target_w = float(w);
     if float(w) < min_w {
         target_w = min_w;
@@ -385,6 +387,58 @@ def _run_engine_ocr(engine: object, img: object) -> object {
     }
 }
 
+def _build_ocr_cache_key(
+    image_input: str,
+    is_base64: bool,
+    languages: list[str],
+    preprocessed: bool
+) -> str {
+    lang_key = "en";
+    if languages != [] {
+        lang_key = str(languages[0]).lower();
+    }
+    if is_base64 {
+        input_sig = hashlib.sha1(str(image_input).encode("utf-8")).hexdigest();
+        return "b64|{}|{}|{}".format(lang_key, ("1" if preprocessed else "0"), input_sig);
+    }
+    path_text = str(image_input);
+    mtime = 0.0;
+    try {
+        mtime = float(os.path.getmtime(path_text));
+    } except Exception as _e {
+        mtime = 0.0;
+    }
+    return "file|{}|{}|{}|{}".format(lang_key, ("1" if preprocessed else "0"), path_text, mtime);
+}
+
+def _should_try_fallback_variant(lines: list, score: float) -> bool {
+    if lines == [] {
+        return True;
+    }
+    alpha_lines = 0;
+    line_count = 0;
+    for row in lines {
+        line_count += 1;
+        txt = str(row["text"]).strip().upper();
+        alpha_count = 0;
+        for ch in txt {
+            if ch >= "A" and ch <= "Z" {
+                alpha_count += 1;
+            }
+        }
+        if alpha_count >= 3 {
+            alpha_lines += 1;
+        }
+    }
+    if line_count >= 12 and score >= 78.0 {
+        return False;
+    }
+    if alpha_lines >= 7 and score >= 72.0 {
+        return False;
+    }
+    return True;
+}
+
 # Public OCR function used by frontend: returns plain text + block metadata.
 def:pub extract_receipt_text(
     image_input: str,
@@ -394,6 +448,11 @@ def:pub extract_receipt_text(
     include_processed_image: bool = False
 ) -> dict {
     try {
+        cache_key = _build_ocr_cache_key(image_input, is_base64, languages, preprocessed);
+        if not include_processed_image and cache_key in _ocr_result_cache {
+            return _ocr_result_cache[cache_key];
+        }
+
         sys = _get_module("sys");
 
         missing_text = "";
@@ -457,37 +516,58 @@ def:pub extract_receipt_text(
         resized_original = _resize_color_for_ocr(image, cv2);
         engine = _get_paddle_engine(languages);
 
-        variants: list = [];
-        if preprocessed {
-            variants = [{"idx": 0, "img": processed}];
-        } else {
-            variants = [{"idx": 0, "img": resized_original}, {"idx": 1, "img": processed}];
+        # Single-pass first; only run heavier fallback preprocessing when quality is weak.
+        first_img = processed;
+        first_idx = 0;
+        fallback_img = None;
+        fallback_idx = -1;
+        if not preprocessed {
+            first_img = resized_original;
+            first_idx = 0;
+            fallback_img = processed;
+            fallback_idx = 1;
         }
 
         best_lines: list = [];
         best_variant = -1;
         best_score = -1.0;
         best_img = None;
-        for v in variants {
-            raw_result = None;
+
+        raw_first = None;
+        try {
+            raw_first = _run_engine_ocr(engine, first_img);
+        } except Exception as _e {
+            raw_first = None;
+        }
+        if raw_first is not None {
+            first_lines = _extract_lines(raw_first);
+            if first_lines != [] {
+                first_score = _score_lines(first_lines);
+                best_lines = first_lines;
+                best_variant = first_idx;
+                best_score = first_score;
+                best_img = first_img;
+            }
+        }
+
+        if fallback_img is not None and _should_try_fallback_variant(best_lines, best_score) {
+            raw_fallback = None;
             try {
-                raw_result = _run_engine_ocr(engine, v["img"]);
+                raw_fallback = _run_engine_ocr(engine, fallback_img);
             } except Exception as _e {
-                raw_result = None;
+                raw_fallback = None;
             }
-            if raw_result is None {
-                continue;
-            }
-            lines_try = _extract_lines(raw_result);
-            if lines_try == [] {
-                continue;
-            }
-            score_try = _score_lines(lines_try);
-            if score_try > best_score {
-                best_score = score_try;
-                best_lines = lines_try;
-                best_variant = int(v["idx"]);
-                best_img = v["img"];
+            if raw_fallback is not None {
+                fb_lines = _extract_lines(raw_fallback);
+                if fb_lines != [] {
+                    fb_score = _score_lines(fb_lines);
+                    if fb_score > best_score {
+                        best_lines = fb_lines;
+                        best_variant = fallback_idx;
+                        best_score = fb_score;
+                        best_img = fallback_img;
+                    }
+                }
             }
         }
 
@@ -506,7 +586,7 @@ def:pub extract_receipt_text(
         }
 
         processed_b64 = "";
-        if include_processed_image and best_img != None {
+        if include_processed_image and best_img is not None {
             try {
                 enc_out = cv2.imencode(".jpg", best_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75]);
                 ok_enc = enc_out[0];
@@ -544,7 +624,7 @@ def:pub extract_receipt_text(
             avg_conf = conf_sum / count;
         }
 
-        return {
+        out = {
             "ok": True,
             "text": text_accum,
             "variant_index": best_variant,
@@ -555,6 +635,23 @@ def:pub extract_receipt_text(
             "processed_image_mime_type": "image/jpeg",
             "error": ""
         };
+        if not include_processed_image {
+            cache_count = 0;
+            for _k in _ocr_result_cache {
+                cache_count += 1;
+            }
+            if cache_count > 80 {
+                purge_keys: list = [];
+                for k in _ocr_result_cache {
+                    purge_keys.append(k);
+                }
+                for k in purge_keys {
+                    _ocr_result_cache.pop(k);
+                }
+            }
+            _ocr_result_cache[cache_key] = out;
+        }
+        return out;
     } except Exception as e {
         return {
             "ok": False,

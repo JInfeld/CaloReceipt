@@ -56,6 +56,28 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
         return "PIECE";
     }
 
+    def norm_name(raw: any) -> str {
+        return String(raw or "").trim().toLowerCase().split(" ").filter(
+            lambda part: str -> bool { return part.trim().length > 0; }
+        ).join(" ");
+    }
+
+    def qty_or_one(raw: any) -> float {
+        parsed = parseFloat(String(raw or "1").trim());
+        if isNaN(parsed) or parsed <= 0 {
+            return 1.0;
+        }
+        return parsed;
+    }
+
+    def num_or_zero(raw: any) -> float {
+        parsed = parseFloat(String(raw or "0").trim());
+        if isNaN(parsed) {
+            return 0.0;
+        }
+        return parsed;
+    }
+
     def pantry_items_ref() -> list {
         if not shared_state.pantry_items {
             shared_state.pantry_items = [];
@@ -353,7 +375,44 @@ def:pub ReceiptUploadTab(shared_state: dict = {}) -> JsxElement {
             return;
         }
 
-        shared_state.pantry_items = pantry_items_ref().concat(staged);
+        merged: list = pantry_items_ref();
+        for incoming in staged {
+            in_name = String(incoming.name or "").trim();
+            in_unit = normalize_unit(String(incoming.unit or "PIECE"));
+            next_merged: list = [];
+            found = false;
+            for cur in merged {
+                cur_name = String(cur.name or "").trim();
+                cur_unit = normalize_unit(String(cur.unit or "PIECE"));
+                if norm_name(cur_name) == norm_name(in_name) and cur_unit == in_unit {
+                    next_merged = next_merged.concat([{
+                        "name": in_name,
+                        "quantity": qty_or_one(cur.quantity) + qty_or_one(incoming.quantity),
+                        "unit": in_unit,
+                        "cost": num_or_zero(cur.cost) + num_or_zero(incoming.cost),
+                        "protein": num_or_zero(cur.protein) + num_or_zero(incoming.protein),
+                        "carb": num_or_zero(cur.carb) + num_or_zero(incoming.carb),
+                        "fat": num_or_zero(cur.fat) + num_or_zero(incoming.fat)
+                    }]);
+                    found = true;
+                } else {
+                    next_merged = next_merged.concat([cur]);
+                }
+            }
+            if not found {
+                next_merged = next_merged.concat([{
+                    "name": in_name,
+                    "quantity": qty_or_one(incoming.quantity),
+                    "unit": in_unit,
+                    "cost": num_or_zero(incoming.cost),
+                    "protein": num_or_zero(incoming.protein),
+                    "carb": num_or_zero(incoming.carb),
+                    "fat": num_or_zero(incoming.fat)
+                }]);
+            }
+            merged = next_merged;
+        }
+        shared_state.pantry_items = merged;
         reset_receipt_parse_state(True, True);
         status_text = ["Added ", String(staged.length), " items to pantry list. Upload next receipt."].join("");
         add_debug("pantry:add", {"added_count": String(staged.length), "pantry_size": String(pantry_items_ref().length)});

@@ -4,7 +4,11 @@ sv import from user {
     ClearUserProfile
 }
 
-def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None) -> JsxElement {
+def:pub UserProfileTab(
+    on_auth_error: any = None,
+    on_profile_change: any = None,
+    user_storage_key: str = ""
+) -> JsxElement {
     has survey_step: int = 0;
     has loading: bool = false;
     has status_text: str = "Profile not saved yet.";
@@ -97,6 +101,43 @@ def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None)
         }
     }
 
+    def profile_cache_key() -> str {
+        key = String(user_storage_key or "").trim().toLowerCase();
+        if key.length == 0 {
+            key = "anonymous";
+        }
+        return ["caloreceipt", key, "profile"].join(":");
+    }
+
+    def save_profile_cache(payload: dict) -> None {
+        try {
+            localStorage.setItem(profile_cache_key(), JSON.stringify(payload));
+        } except Exception as _e {
+            0;
+        }
+    }
+
+    def load_profile_cache() -> dict {
+        try {
+            raw = localStorage.getItem(profile_cache_key());
+            if raw and raw.length > 0 {
+                parsed = JSON.parse(raw);
+                return parsed;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return {};
+    }
+
+    def clear_profile_cache() -> None {
+        try {
+            localStorage.removeItem(profile_cache_key());
+        } except Exception as _e {
+            0;
+        }
+    }
+
     def step_title() -> str {
         if survey_step == 0 {
             return "Basic Info";
@@ -132,6 +173,7 @@ def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None)
             out = first_report_payload(result);
             if out.saved {
                 saved_profile = payload;
+                save_profile_cache(payload);
                 status_text = "Profile saved to backend.";
                 if on_profile_change {
                     on_profile_change(payload);
@@ -163,12 +205,18 @@ def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None)
                 return;
             }
             if not out or Object.keys(out).length == 0 {
-                status_text = "No saved profile found.";
-                saved_profile = {};
-                loading = false;
-                return;
+                cached = load_profile_cache();
+                if cached and Object.keys(cached).length > 0 {
+                    out = cached;
+                } else {
+                    status_text = "No saved profile found.";
+                    saved_profile = {};
+                    loading = false;
+                    return;
+                }
             }
 
+            save_profile_cache(out);
             saved_profile = out;
             username = String(out.username or "");
             age = String(out.age);
@@ -184,6 +232,26 @@ def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None)
                 on_profile_change(out);
             }
         } except Exception as e {
+            cached = load_profile_cache();
+            if cached and Object.keys(cached).length > 0 {
+                out = cached;
+                saved_profile = out;
+                username = String(out.username or "");
+                age = String(out.age);
+                height = String(out.height);
+                weight = String(out.weight);
+                sex = String(out.sex).toUpperCase();
+                goal = String(out.goal).toUpperCase();
+                fitness_level = String(out.fitness_level).toUpperCase();
+                dietary_notes = (out.dietary_restrictions or []).join(", ");
+                allergy_notes = (out.allergies or []).join(", ");
+                status_text = "Profile loaded from local cache.";
+                if on_profile_change {
+                    on_profile_change(out);
+                }
+                loading = false;
+                return;
+            }
             err_text = e.toString();
             status_text = "Load failed: " + err_text;
             maybe_trigger_auth_error(err_text);
@@ -203,6 +271,7 @@ def:pub UserProfileTab(on_auth_error: any = None, on_profile_change: any = None)
             weight = "";
             dietary_notes = "";
             allergy_notes = "";
+            clear_profile_cache();
             status_text = "Profile cleared from backend.";
             if on_profile_change {
                 on_profile_change({});

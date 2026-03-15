@@ -89,8 +89,30 @@ def:pub RecipesTab(
         return parsed;
     }
 
+    def is_listish(raw: any) -> bool {
+        if raw == None {
+            return false;
+        }
+        if Array.isArray(raw) {
+            return true;
+        }
+        try {
+            raw_len = parseInt(String(raw.length));
+            if isNaN(raw_len) or raw_len < 0 {
+                return false;
+            }
+            probe = raw.map(lambda item: any -> any : item);
+            if Array.isArray(probe) {
+                return true;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return false;
+    }
+
     def pantry_items_ref() -> list {
-        if not shared_state.pantry_items or not Array.isArray(shared_state.pantry_items) {
+        if not shared_state.pantry_items or not is_listish(shared_state.pantry_items) {
             shared_state.pantry_items = [];
         }
         return shared_state.pantry_items;
@@ -104,7 +126,7 @@ def:pub RecipesTab(
     }
 
     def visible_recipes() -> list {
-        if not Array.isArray(recipes) {
+        if not is_listish(recipes) {
             return [];
         }
         if filter_mode == "favorites" {
@@ -373,13 +395,27 @@ def:pub RecipesTab(
                 <button onClick={clear_saved_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #991b1b", "background": "#fee2e2", "fontWeight": "700"}}>Clear Saved Recipe (API)</button>
             </div>
 
-            <div style={{"display": "grid", "gridTemplateColumns": "minmax(0, 1.3fr) minmax(0, 1fr)", "gap": "12px"}}>
+            <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))", "gap": "12px"}}>
                 <div style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff", "display": "grid", "gap": "10px"}}>
                     <h3 style={{"margin": "0"}}>Pantry Inputs For Recipe API</h3>
-                    <div style={{"display": "grid", "gridTemplateColumns": "2fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr", "gap": "8px"}}>
-                        <input value={pantry_name} onChange={lambda e: any -> None { pantry_name = e.target.value; }} placeholder="name" />
-                        <input value={pantry_quantity} onChange={lambda e: any -> None { pantry_quantity = e.target.value; }} placeholder="qty" />
-                        <select value={pantry_unit} onChange={lambda e: any -> None { pantry_unit = e.target.value; }}>
+                    <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(110px, 1fr))", "gap": "8px", "alignItems": "end"}}>
+                        <input
+                            value={pantry_name}
+                            onChange={lambda e: any -> None { pantry_name = e.target.value; }}
+                            placeholder="name"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px", "gridColumn": "span 2"}}
+                        />
+                        <input
+                            value={pantry_quantity}
+                            onChange={lambda e: any -> None { pantry_quantity = e.target.value; }}
+                            placeholder="qty"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <select
+                            value={pantry_unit}
+                            onChange={lambda e: any -> None { pantry_unit = e.target.value; }}
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        >
                             <option value="PIECE">PIECE</option>
                             <option value="LB">LB</option>
                             <option value="OZ">OZ</option>
@@ -389,38 +425,79 @@ def:pub RecipesTab(
                             <option value="CLOVE">CLOVE</option>
                             <option value="BUNCH">BUNCH</option>
                         </select>
-                        <input value={pantry_cost} onChange={lambda e: any -> None { pantry_cost = e.target.value; }} placeholder="cost" />
-                        <input value={pantry_protein} onChange={lambda e: any -> None { pantry_protein = e.target.value; }} placeholder="protein" />
-                        <input value={pantry_carb} onChange={lambda e: any -> None { pantry_carb = e.target.value; }} placeholder="carb" />
-                        <input value={pantry_fat} onChange={lambda e: any -> None { pantry_fat = e.target.value; }} placeholder="fat" />
-                        <button onClick={add_pantry_item}>Add</button>
+                        <input
+                            value={pantry_cost}
+                            onChange={lambda e: any -> None { pantry_cost = e.target.value; }}
+                            placeholder="cost"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <input
+                            value={pantry_protein}
+                            onChange={lambda e: any -> None { pantry_protein = e.target.value; }}
+                            placeholder="protein"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <input
+                            value={pantry_carb}
+                            onChange={lambda e: any -> None { pantry_carb = e.target.value; }}
+                            placeholder="carb"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <input
+                            value={pantry_fat}
+                            onChange={lambda e: any -> None { pantry_fat = e.target.value; }}
+                            placeholder="fat"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <button
+                            onClick={add_pantry_item}
+                            style={{"padding": "8px", "borderRadius": "8px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}
+                        >
+                            Add
+                        </button>
                     </div>
 
                     {(
                         <div style={{"opacity": "0.75"}}>No pantry items yet.</div>
                     ) if pantry_items_ref().length == 0 else (
-                        <table style={{"width": "100%", "borderCollapse": "collapse"}}>
-                            <thead>
-                                <tr>
-                                    <th>Name</th><th>Qty</th><th>Unit</th><th>Cost</th><th>P</th><th>C</th><th>F</th><th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {pantry_items_ref().map(
-                                    lambda item: dict -> JsxElement { return
-                                        <tr key={item.name}>
-                                            <td>{item.name}</td>
-                                            <td>{item.quantity}</td>
-                                            <td>{item.unit}</td>
-                                            <td>{item.cost}</td>
-                                            <td>{item.protein}</td>
-                                            <td>{item.carb}</td>
-                                            <td>{item.fat}</td>
-                                            <td><button onClick={lambda -> None { remove_pantry_item(item.name); }}>Remove</button></td>
-                                        </tr>; }
-                                )}
-                            </tbody>
-                        </table>
+                        <div style={{"overflowX": "auto"}}>
+                            <table style={{"width": "100%", "borderCollapse": "collapse"}}>
+                                <thead>
+                                    <tr style={{"background": "#eff6ff"}}>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Name</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Qty</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Unit</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Cost</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>P</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>C</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>F</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {pantry_items_ref().map(
+                                        lambda item: dict -> JsxElement { return
+                                            <tr key={item.name} style={{"borderTop": "1px solid #e2e8f0"}}>
+                                                <td style={{"padding": "8px"}}>{item.name}</td>
+                                                <td style={{"padding": "8px"}}>{item.quantity}</td>
+                                                <td style={{"padding": "8px"}}>{item.unit}</td>
+                                                <td style={{"padding": "8px"}}>{item.cost}</td>
+                                                <td style={{"padding": "8px"}}>{item.protein}</td>
+                                                <td style={{"padding": "8px"}}>{item.carb}</td>
+                                                <td style={{"padding": "8px"}}>{item.fat}</td>
+                                                <td style={{"padding": "8px"}}>
+                                                    <button
+                                                        onClick={lambda -> None { remove_pantry_item(item.name); }}
+                                                        style={{"padding": "6px 8px", "borderRadius": "8px", "border": "1px solid #991b1b", "background": "#fee2e2"}}
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                </td>
+                                            </tr>; }
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
                     )}
                 </div>
 
@@ -448,7 +525,7 @@ def:pub RecipesTab(
                                 lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
                             )}
                         </ol>
-                    ) if (generated_recipe and Array.isArray(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
+                    ) if (generated_recipe and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
                 </div>
 
             <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>

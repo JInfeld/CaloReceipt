@@ -20,6 +20,7 @@ def:pub app() -> JsxElement {
     has auth_loading: bool = false;
     has auth_status: str = "Please sign in to access your private data.";
     has current_user_display: str = "";
+    has is_hydrating_user_state: bool = false;
 
     def tab_button_style(tab_id: str) -> dict {
         is_active = active_tab == tab_id;
@@ -68,18 +69,64 @@ def:pub app() -> JsxElement {
         return [("Working... " if auth_loading else "Ready. "), auth_status].join("");
     }
 
-    def as_pantry_items(raw: any) -> list {
+    def is_listish(raw: any) -> bool {
+        if raw == None {
+            return false;
+        }
         if Array.isArray(raw) {
+            return true;
+        }
+        try {
+            raw_len = parseInt(String(raw.length));
+            if isNaN(raw_len) or raw_len < 0 {
+                return false;
+            }
+            probe = raw.map(lambda item: any -> any : item);
+            if Array.isArray(probe) {
+                return true;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return false;
+    }
+
+    def as_pantry_items(raw: any) -> list {
+        if is_listish(raw) {
             return raw;
         }
         return [];
     }
 
     def as_nutrition_history(raw: any) -> list {
-        if Array.isArray(raw) and raw.length > 0 {
+        if is_listish(raw) and raw.length > 0 {
             return raw;
         }
         return default_nutrition_history();
+    }
+
+    def error_message(raw: any, fallback: str = "Unknown error.") -> str {
+        if raw == None {
+            return fallback;
+        }
+        if raw == false {
+            return fallback;
+        }
+        try {
+            if raw.error and String(raw.error).trim().length > 0 {
+                return String(raw.error).trim();
+            }
+            if raw.message and String(raw.message).trim().length > 0 {
+                return String(raw.message).trim();
+            }
+        } except Exception as _e {
+            0;
+        }
+        text = String(raw).trim();
+        if text.length > 0 and text != "[object Object]" {
+            return text;
+        }
+        return fallback;
     }
 
     def safe_day_index(raw: any, history_len: int = 0) -> int {
@@ -93,24 +140,70 @@ def:pub app() -> JsxElement {
         return idx;
     }
 
-    def set_app_state(next_pantry: any = None, next_history: any = None, next_idx: any = None) -> None {
-        pantry_items = as_pantry_items(app_state.pantry_items);
-        nutrition_history = as_nutrition_history(app_state.nutrition_history);
-        nutrition_selected_day_index = safe_day_index(
-            app_state.nutrition_selected_day_index,
-            nutrition_history.length
-        );
+    def cache_key(suffix: str) -> str {
+        user_key = auth_email.trim().toLowerCase();
+        if user_key.length == 0 {
+            user_key = "anonymous";
+        }
+        return ["caloreceipt", user_key, suffix].join(":");
+    }
 
-        if next_pantry != None {
-            pantry_items = as_pantry_items(next_pantry);
+    def load_cached_pantry() -> list {
+        try {
+            raw = localStorage.getItem(cache_key("pantry"));
+            if raw and raw.length > 0 {
+                parsed = JSON.parse(raw);
+                return as_pantry_items(parsed);
+            }
+        } except Exception as _e {
+            0;
         }
-        if next_history != None {
-            nutrition_history = as_nutrition_history(next_history);
-        }
-        if next_idx != None {
-            nutrition_selected_day_index = safe_day_index(next_idx, nutrition_history.length);
-        }
+        return [];
+    }
 
+    def load_cached_nutrition() -> dict {
+        try {
+            raw = localStorage.getItem(cache_key("nutrition"));
+            if raw and raw.length > 0 {
+                parsed = JSON.parse(raw);
+                history = as_nutrition_history(parsed.weekly_history);
+                return {
+                    "weekly_history": history,
+                    "selected_day_index": safe_day_index(parsed.selected_day_index, history.length)
+                };
+            }
+        } except Exception as _e {
+            0;
+        }
+        return {
+            "weekly_history": default_nutrition_history(),
+            "selected_day_index": 0
+        };
+    }
+
+    def save_cached_pantry(items: list) -> None {
+        try {
+            localStorage.setItem(cache_key("pantry"), JSON.stringify(items));
+        } except Exception as _e {
+            0;
+        }
+    }
+
+    def save_cached_nutrition(weekly: list, idx: int) -> None {
+        try {
+            localStorage.setItem(
+                cache_key("nutrition"),
+                JSON.stringify({"weekly_history": weekly, "selected_day_index": idx})
+            );
+        } except Exception as _e {
+            0;
+        }
+    }
+
+    def set_app_state(next_pantry: any, next_history: any, next_idx: any) -> None {
+        pantry_items = as_pantry_items(next_pantry);
+        nutrition_history = as_nutrition_history(next_history);
+        nutrition_selected_day_index = safe_day_index(next_idx, nutrition_history.length);
         app_state = {
             "pantry_items": pantry_items,
             "nutrition_history": nutrition_history,
@@ -119,19 +212,16 @@ def:pub app() -> JsxElement {
     }
 
     def ensure_app_state_defaults() -> None {
+        history = as_nutrition_history(app_state.nutrition_history);
         set_app_state(
-            next_pantry=as_pantry_items(app_state.pantry_items),
-            next_history=as_nutrition_history(app_state.nutrition_history),
-            next_idx=safe_day_index(app_state.nutrition_selected_day_index, as_nutrition_history(app_state.nutrition_history).length)
+            as_pantry_items(app_state.pantry_items),
+            history,
+            safe_day_index(app_state.nutrition_selected_day_index, history.length)
         );
     }
 
     def reset_local_user_state() -> None {
-        set_app_state(
-            next_pantry=[],
-            next_history=default_nutrition_history(),
-            next_idx=0
-        );
+        set_app_state([], default_nutrition_history(), 0);
         current_user_display = "";
     }
 
@@ -154,6 +244,9 @@ def:pub app() -> JsxElement {
     }
 
     def first_report_payload(raw_result: dict) -> dict {
+        if raw_result == None {
+            return {};
+        }
         if raw_result.reports and raw_result.reports.length > 0 {
             return raw_result.reports[0];
         }
@@ -184,65 +277,201 @@ def:pub app() -> JsxElement {
         is_logged_in = jacIsLoggedIn();
     }
 
+    def token_from_auth_payload(payload: dict = {}) -> str {
+        token = "";
+        if payload and payload.data and payload.data.token {
+            token = String(payload.data.token);
+        } elif payload and payload.data and payload.data.result and payload.data.result.token {
+            token = String(payload.data.result.token);
+        } elif payload and payload.token {
+            token = String(payload.token);
+        } elif payload and payload.access_token {
+            token = String(payload.access_token);
+        }
+        return token.trim();
+    }
+
+    async def auth_request(path: str, email: str, password: str) -> dict {
+        try {
+            response = await fetch(
+                path,
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": JSON.stringify({"username": email, "password": password})
+                }
+            );
+            raw_text = await response.text();
+            payload = {};
+            try {
+                payload = JSON.parse(raw_text);
+            } except Exception as _parse_err {
+                payload = {};
+            }
+
+            token = token_from_auth_payload(payload);
+            if token.length > 0 {
+                localStorage.setItem("jac_token", token);
+            }
+
+            err = "";
+            if not response.ok {
+                err = error_message(payload, "");
+                if err.length == 0 {
+                    if raw_text and raw_text.trim().length > 0 {
+                        err = raw_text.trim();
+                    } else {
+                        err = ["HTTP ", String(response.status)].join("");
+                    }
+                }
+            }
+
+            return {
+                "ok": response.ok,
+                "status": response.status,
+                "token": token,
+                "error": err
+            };
+        } except Exception as e {
+            return {
+                "ok": false,
+                "status": 0,
+                "token": "",
+                "error": error_message(e, "Auth request failed.")
+            };
+        }
+    }
+
+    async def attempt_login(email: str, password: str) -> dict {
+        runtime_err = "";
+        try {
+            login_result = await jacLogin(email, password);
+            if login_result == true or jacIsLoggedIn() {
+                return {"ok": true, "error": ""};
+            }
+            runtime_err = error_message(login_result, "No auth token returned.");
+        } except Exception as e {
+            runtime_err = error_message(e, "Runtime login failed.");
+        }
+
+        api_out = await auth_request("/user/login", email, password);
+        if api_out.ok and (api_out.token.length > 0 or jacIsLoggedIn()) {
+            return {"ok": true, "error": ""};
+        }
+        if jacIsLoggedIn() {
+            return {"ok": true, "error": ""};
+        }
+
+        parts: list = [];
+        if runtime_err.trim().length > 0 {
+            parts = parts.concat([runtime_err]);
+        }
+        api_err = error_message(api_out.error, "");
+        if api_err.trim().length > 0 {
+            parts = parts.concat([api_err]);
+        }
+        if parts.length == 0 {
+            parts = ["Invalid username or password."];
+        }
+        return {"ok": false, "error": parts.join(" | ")};
+    }
+
+    async def attempt_signup(email: str, password: str) -> dict {
+        runtime_err = "";
+        try {
+            signup_result = await jacSignup(email, password);
+            if signup_result == true {
+                return {"ok": true, "error": ""};
+            }
+            if signup_result and (signup_result.success == true or signup_result.ok == true) {
+                return {"ok": true, "error": ""};
+            }
+            runtime_err = error_message(signup_result, "Signup was rejected.");
+        } except Exception as e {
+            runtime_err = error_message(e, "Runtime signup failed.");
+        }
+
+        api_out = await auth_request("/user/register", email, password);
+        if api_out.ok {
+            return {"ok": true, "error": ""};
+        }
+
+        parts: list = [];
+        if runtime_err.trim().length > 0 {
+            parts = parts.concat([runtime_err]);
+        }
+        api_err = error_message(api_out.error, "");
+        if api_err.trim().length > 0 {
+            parts = parts.concat([api_err]);
+        }
+        if parts.length == 0 {
+            parts = ["Unable to create account."];
+        }
+        return {"ok": false, "error": parts.join(" | ")};
+    }
+
     async def load_user_state() -> None {
         ensure_app_state_defaults();
         try {
+            fallback_pantry = load_cached_pantry();
+            fallback_nutrition = load_cached_nutrition();
+            next_pantry = fallback_pantry;
+            next_weekly = fallback_nutrition.weekly_history;
+            next_idx = fallback_nutrition.selected_day_index;
+
             pantry_result = root spawn GetPantryState();
             pantry_out = first_report_payload(pantry_result);
-            if pantry_out and pantry_out.error {
-                err_text = String(pantry_out.error);
-                if is_auth_error_text(err_text) {
-                    handle_auth_required("Session expired. Please sign in again.");
-                    return;
+            if pantry_out and not pantry_out.error and pantry_out.items != None {
+                clean_pantry = as_pantry_items(pantry_out.items);
+                if clean_pantry.length == 0 and fallback_pantry.length > 0 {
+                    clean_pantry = fallback_pantry;
                 }
-            } elif pantry_out and pantry_out.items != None {
-                set_app_state(next_pantry=as_pantry_items(pantry_out.items));
-            } else {
-                set_app_state(next_pantry=[]);
+                next_pantry = clean_pantry;
+                save_cached_pantry(clean_pantry);
             }
 
             nutrition_result = root spawn GetNutritionState();
             nutrition_out = first_report_payload(nutrition_result);
-            if nutrition_out and nutrition_out.error {
-                err_text = String(nutrition_out.error);
-                if is_auth_error_text(err_text) {
-                    handle_auth_required("Session expired. Please sign in again.");
-                    return;
-                }
-            } elif nutrition_out and nutrition_out.weekly_history != None {
+            if nutrition_out and not nutrition_out.error and nutrition_out.weekly_history != None {
                 next_weekly = as_nutrition_history(nutrition_out.weekly_history);
-                idx = safe_day_index(nutrition_out.selected_day_index or 0, next_weekly.length);
-                set_app_state(next_history=next_weekly, next_idx=idx);
+                next_idx = safe_day_index(nutrition_out.selected_day_index or 0, next_weekly.length);
+                save_cached_nutrition(next_weekly, next_idx);
             }
+
+            set_app_state(next_pantry, next_weekly, next_idx);
 
             profile_result = root spawn GetUserProfile();
             profile_out = first_report_payload(profile_result);
             if profile_out and profile_out.error {
-                err_text = String(profile_out.error);
-                if is_auth_error_text(err_text) {
-                    handle_auth_required("Session expired. Please sign in again.");
-                    return;
-                }
                 set_current_user_display_from_profile({});
             } else {
                 set_current_user_display_from_profile(profile_out or {});
             }
         } except Exception as e {
-            err_text = e.toString();
-            if is_auth_error_text(err_text) {
-                handle_auth_required("Session expired. Please sign in again.");
-            }
+            fallback_nutrition = load_cached_nutrition();
+            set_app_state(
+                load_cached_pantry(),
+                fallback_nutrition.weekly_history,
+                fallback_nutrition.selected_day_index
+            );
+            set_current_user_display_from_profile({});
         }
     }
 
     async def save_pantry_state(items: list) -> None {
         clean_items = as_pantry_items(items);
-        set_app_state(next_pantry=clean_items);
+        save_cached_pantry(clean_items);
+        nutrition_cache = load_cached_nutrition();
+        set_app_state(clean_items, nutrition_cache.weekly_history, nutrition_cache.selected_day_index);
         try {
             result = root spawn SavePantryState(items=clean_items);
             out = first_report_payload(result);
             if out and out.error and is_auth_error_text(String(out.error)) {
                 handle_auth_required("Session expired. Please sign in again.");
+                return;
+            }
+            if out and out.saved == false {
+                return;
             }
         } except Exception as e {
             if is_auth_error_text(e.toString()) {
@@ -255,7 +484,9 @@ def:pub app() -> JsxElement {
         weekly = as_nutrition_history(payload.weekly_history);
         idx = safe_day_index(payload.selected_day_index or 0, weekly.length);
 
-        set_app_state(next_history=weekly, next_idx=idx);
+        save_cached_nutrition(weekly, idx);
+        pantry_cache = load_cached_pantry();
+        set_app_state(pantry_cache, weekly, idx);
         try {
             result = root spawn SaveNutritionState(
                 selected_day_index=idx,
@@ -264,6 +495,10 @@ def:pub app() -> JsxElement {
             out = first_report_payload(result);
             if out and out.error and is_auth_error_text(String(out.error)) {
                 handle_auth_required("Session expired. Please sign in again.");
+                return;
+            }
+            if out and out.saved == false {
+                return;
             }
         } except Exception as e {
             if is_auth_error_text(e.toString()) {
@@ -282,19 +517,24 @@ def:pub app() -> JsxElement {
 
         auth_loading = true;
         auth_status = "Signing in...";
-        try {
-            await jacLogin(email, password);
-            set_session_from_runtime();
-            if is_logged_in {
-                current_user_display = email;
+        login_out = await attempt_login(email, password);
+        session_ok = (login_out.ok == true) or jacIsLoggedIn();
+        is_logged_in = session_ok;
+        if session_ok {
+            is_hydrating_user_state = true;
+            current_user_display = email;
+            try {
                 await load_user_state();
                 auth_status = "Signed in.";
-                auth_password = "";
-            } else {
-                auth_status = "Login did not create an active session.";
+            } except Exception as e {
+                auth_status = "Signed in, but failed to load user data: " + error_message(e, "Unknown load error.");
             }
-        } except Exception as e {
-            auth_status = "Login failed: " + e.toString();
+            is_hydrating_user_state = false;
+            auth_password = "";
+        } else {
+            is_hydrating_user_state = false;
+            reset_local_user_state();
+            auth_status = "Login failed: " + error_message(login_out.error, "Invalid credentials.");
         }
         auth_loading = false;
     }
@@ -309,20 +549,30 @@ def:pub app() -> JsxElement {
 
         auth_loading = true;
         auth_status = "Creating account...";
-        try {
-            await jacSignup(email, password);
-            await jacLogin(email, password);
-            set_session_from_runtime();
-            if is_logged_in {
-                current_user_display = email;
+        signup_out = await attempt_signup(email, password);
+        if not signup_out.ok {
+            auth_status = "Signup failed: " + error_message(signup_out.error, "Unable to create account.");
+            auth_loading = false;
+            return;
+        }
+
+        login_out = await attempt_login(email, password);
+        session_ok = (login_out.ok == true) or jacIsLoggedIn();
+        is_logged_in = session_ok;
+        if session_ok {
+            is_hydrating_user_state = true;
+            current_user_display = email;
+            try {
                 await load_user_state();
                 auth_status = "Account created and signed in.";
-                auth_password = "";
-            } else {
-                auth_status = "Account created, but auto-login was not confirmed.";
+            } except Exception as e {
+                auth_status = "Account created and signed in, but failed to load user data: " + error_message(e, "Unknown load error.");
             }
-        } except Exception as e {
-            auth_status = "Signup failed: " + e.toString();
+            is_hydrating_user_state = false;
+            auth_password = "";
+        } else {
+            is_hydrating_user_state = false;
+            auth_status = "Account created, but login failed: " + error_message(login_out.error, "Please sign in manually.");
         }
         auth_loading = false;
     }
@@ -335,6 +585,7 @@ def:pub app() -> JsxElement {
             0;
         }
         is_logged_in = false;
+        is_hydrating_user_state = false;
         reset_local_user_state();
         auth_password = "";
         auth_status = "You have been logged out.";
@@ -344,6 +595,7 @@ def:pub app() -> JsxElement {
     def handle_auth_required(message: str = "Session expired. Please sign in again.") -> None {
         jacLogout();
         is_logged_in = false;
+        is_hydrating_user_state = false;
         reset_local_user_state();
         auth_password = "";
         auth_status = message;
@@ -357,6 +609,7 @@ def:pub app() -> JsxElement {
             0;
         }
         is_logged_in = false;
+        is_hydrating_user_state = false;
         auth_status = "Please sign in to access your private data.";
     }
 
@@ -558,7 +811,11 @@ def:pub app() -> JsxElement {
                     <DashboardAiTab on_auth_error={handle_auth_required} />
                 </div>
                 <div style={{"display": ("block" if active_tab == "profile" else "none")}}>
-                    <UserProfileTab on_auth_error={handle_auth_required} on_profile_change={handle_profile_change} />
+                    <UserProfileTab
+                        on_auth_error={handle_auth_required}
+                        on_profile_change={handle_profile_change}
+                        user_storage_key={auth_email}
+                    />
                 </div>
                 <div style={{"display": ("block" if active_tab == "recipes" else "none")}}>
                     <RecipesTab
@@ -568,7 +825,11 @@ def:pub app() -> JsxElement {
                     />
                 </div>
                 <div style={{"display": ("block" if active_tab == "nutrition" else "none")}}>
-                    <NutritionTab shared_state={app_state} on_nutrition_change={save_nutrition_state} />
+                    <NutritionTab
+                        shared_state={app_state}
+                        on_nutrition_change={save_nutrition_state}
+                        is_hydrating={is_hydrating_user_state}
+                    />
                 </div>
             </div>
         </div>;

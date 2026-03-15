@@ -75,8 +75,30 @@ def:pub ReceiptUploadTab(
         return "PIECE";
     }
 
+    def is_listish(raw: any) -> bool {
+        if raw == None {
+            return false;
+        }
+        if Array.isArray(raw) {
+            return true;
+        }
+        try {
+            raw_len = parseInt(String(raw.length));
+            if isNaN(raw_len) or raw_len < 0 {
+                return false;
+            }
+            probe = raw.map(lambda item: any -> any : item);
+            if Array.isArray(probe) {
+                return true;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return false;
+    }
+
     def pantry_items_ref() -> list {
-        if not shared_state.pantry_items or not Array.isArray(shared_state.pantry_items) {
+        if not shared_state.pantry_items or not is_listish(shared_state.pantry_items) {
             shared_state.pantry_items = [];
         }
         return shared_state.pantry_items;

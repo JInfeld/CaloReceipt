@@ -1,4 +1,8 @@
-def:pub NutritionTab(shared_state: dict = {}, on_nutrition_change: any = None) -> JsxElement {
+def:pub NutritionTab(
+    shared_state: dict = {},
+    on_nutrition_change: any = None,
+    is_hydrating: bool = false
+) -> JsxElement {
     has selected_day_index: int = 0;
     has weekly_history: list = [
         {"day": "Mon", "protein": 82, "carbs": 71, "fat": 66, "move": 74},
@@ -10,10 +14,32 @@ def:pub NutritionTab(shared_state: dict = {}, on_nutrition_change: any = None) -
         {"day": "Sun", "protein": 90, "carbs": 75, "fat": 73, "move": 84}
     ];
 
+    def is_listish(raw: any) -> bool {
+        if raw == None {
+            return false;
+        }
+        if Array.isArray(raw) {
+            return true;
+        }
+        try {
+            raw_len = parseInt(String(raw.length));
+            if isNaN(raw_len) or raw_len < 0 {
+                return false;
+            }
+            probe = raw.map(lambda item: any -> any : item);
+            if Array.isArray(probe) {
+                return true;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return false;
+    }
+
     def push_nutrition_state() -> None {
         shared_state.nutrition_history = weekly_history;
         shared_state.nutrition_selected_day_index = selected_day_index;
-        if on_nutrition_change {
+        if on_nutrition_change and not is_hydrating {
             on_nutrition_change({
                 "weekly_history": weekly_history,
                 "selected_day_index": selected_day_index
@@ -22,7 +48,7 @@ def:pub NutritionTab(shared_state: dict = {}, on_nutrition_change: any = None) -
     }
 
     can with entry {
-        if shared_state.nutrition_history and Array.isArray(shared_state.nutrition_history) and shared_state.nutrition_history.length > 0 {
+        if shared_state.nutrition_history and is_listish(shared_state.nutrition_history) and shared_state.nutrition_history.length > 0 {
             weekly_history = shared_state.nutrition_history;
         }
         if shared_state.nutrition_selected_day_index != None {

@@ -262,19 +262,31 @@ node NutritionState {
 
 walker SavePantryState {
     has items: list;
+    has save_error: str = "";
 
     can save with Root entry {
         try {
             visit [-->];
-            here ++> PantryState(items=self.items);
-            report {"saved": True, "count": len(self.items)};
         } except Exception as e {
-            report {"saved": False, "error": str(e)};
+            self.save_error = str(e);
         }
     }
 
     can clear_old with PantryState entry {
         del here;
+    }
+
+    can finish with Root exit {
+        if self.save_error {
+            report {"saved": False, "error": self.save_error};
+            return;
+        }
+        try {
+            here ++> PantryState(items=self.items);
+            report {"saved": True, "count": len(self.items)};
+        } except Exception as e {
+            report {"saved": False, "error": str(e)};
+        }
     }
 }
 
@@ -311,10 +323,26 @@ walker ClearPantryState {
 walker SaveNutritionState {
     has selected_day_index: int;
     has weekly_history: list;
+    has save_error: str = "";
 
     can save with Root entry {
         try {
             visit [-->];
+        } except Exception as e {
+            self.save_error = str(e);
+        }
+    }
+
+    can clear_old with NutritionState entry {
+        del here;
+    }
+
+    can finish with Root exit {
+        if self.save_error {
+            report {"saved": False, "error": self.save_error};
+            return;
+        }
+        try {
             here ++> NutritionState(
                 selected_day_index=self.selected_day_index,
                 weekly_history=self.weekly_history
@@ -323,10 +351,6 @@ walker SaveNutritionState {
         } except Exception as e {
             report {"saved": False, "error": str(e)};
         }
-    }
-
-    can clear_old with NutritionState entry {
-        del here;
     }
 }
 

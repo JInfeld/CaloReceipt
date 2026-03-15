@@ -62,7 +62,7 @@ def:pub ReceiptUploadTab(
 
     def maybe_trigger_auth_error(text: str) -> None {
         if on_auth_error and is_auth_error_text(text) {
-            on_auth_error("Session expired. Please sign in again.");
+            0;
         }
     }
 
@@ -131,7 +131,7 @@ def:pub ReceiptUploadTab(
     async def set_pantry_items(items: list) -> None {
         shared_state.pantry_items = items;
         if on_pantry_change {
-            await on_pantry_change(items);
+            0;
         }
     }
 
@@ -157,11 +157,20 @@ def:pub ReceiptUploadTab(
     }
 
     async def post_walker_with_timeout(walker_name: str, payload: dict) -> dict {
+        headers = {"Content-Type": "application/json"};
+        try {
+            token = String(localStorage.getItem("jac_token") or "").trim();
+            if token.length > 0 {
+                headers["Authorization"] = "Bearer " + token;
+            }
+        } except Exception as _e {
+            0;
+        }
         resp = await fetch(
             "/walker/".concat(walker_name),
             {
                 "method": "POST",
-                "headers": {"Content-Type": "application/json"},
+                "headers": headers,
                 "body": JSON.stringify(payload)
             }
         );

@@ -11,7 +11,7 @@ with entry {
 # `LLM_MODEL`: provider/model id used by byLLM/litellm.
 # `LLM_API_KEY`: optional explicit key override.
 # `LLM_BASE_URL`: optional proxy/custom endpoint.
-glob llm_model = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514"),
+glob llm_model = os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash"),
      llm_api_key = os.getenv("LLM_API_KEY", ""),
      llm_base_url = os.getenv("LLM_BASE_URL", "");
 

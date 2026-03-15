@@ -291,7 +291,7 @@ node MealIngredient {
 # 2) generate new recipe with LLM
 # 3) persist recipe + ingredients
 # 4) return response payload for frontend rendering
-walker:pub GenerateRecipeFromPantry {
+walker GenerateRecipeFromPantry {
     has profile: dict;
     has pantry_ingredients: list[dict];
 
@@ -377,7 +377,7 @@ walker:pub GenerateRecipeFromPantry {
 }
 
 # Read back the latest generated recipe from graph storage.
-walker:pub ListGeneratedRecipe {
+walker ListGeneratedRecipe {
     has recipe: dict = {};
     has ingredients: list = [];
 
@@ -415,7 +415,7 @@ walker:pub ListGeneratedRecipe {
 }
 
 # Clear persisted recipe state.
-walker:pub ClearGeneratedRecipe {
+walker ClearGeneratedRecipe {
     can collect with Root entry {
         visit [-->];
     }
@@ -434,7 +434,7 @@ walker:pub ClearGeneratedRecipe {
 }
 
 # Convert receipt image directly into pantry ingredients with a single LLM call.
-walker:pub ParseReceiptImageToPantry {
+walker ParseReceiptImageToPantry {
     has image_base64: str;
     has image_mime_type: str = "image/jpeg";
 
@@ -667,7 +667,7 @@ walker:pub ParseReceiptImageToPantry {
 }
 
 # Convert OCR text into pantry ingredients with a single LLM call.
-walker:pub ParseReceiptTextToPantry {
+walker ParseReceiptTextToPantry {
     has receipt_text: str;
 
     can run with Root entry {

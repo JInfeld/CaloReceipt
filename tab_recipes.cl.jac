@@ -8,7 +8,11 @@ sv import from user {
     GenerateUserMacroNeeds
 }
 
-def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
+def:pub RecipesTab(
+    shared_state: dict = {},
+    on_auth_error: any = None,
+    on_pantry_change: any = None
+) -> JsxElement {
     has filter_mode: str = "all";
     has loading: bool = false;
     has status_text: str = "Recipe API ready.";
@@ -60,6 +64,23 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
         return raw_result;
     }
 
+    def is_auth_error_text(text: str) -> bool {
+        lower = String(text or "").toLowerCase();
+        return (
+            lower.includes("401") or
+            lower.includes("unauthorized") or
+            lower.includes("forbidden") or
+            lower.includes("token") or
+            lower.includes("auth")
+        );
+    }
+
+    def maybe_trigger_auth_error(text: str) -> None {
+        if on_auth_error and is_auth_error_text(text) {
+            on_auth_error("Session expired. Please sign in again.");
+        }
+    }
+
     def to_num(value: str, fallback: float = 0.0) -> float {
         parsed = parseFloat(value);
         if isNaN(parsed) {
@@ -68,14 +89,46 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
         return parsed;
     }
 
+    def is_listish(raw: any) -> bool {
+        if raw == None {
+            return false;
+        }
+        if Array.isArray(raw) {
+            return true;
+        }
+        try {
+            raw_len = parseInt(String(raw.length));
+            if isNaN(raw_len) or raw_len < 0 {
+                return false;
+            }
+            probe = raw.map(lambda item: any -> any : item);
+            if Array.isArray(probe) {
+                return true;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return false;
+    }
+
     def pantry_items_ref() -> list {
-        if not shared_state.pantry_items {
+        if not shared_state.pantry_items or not is_listish(shared_state.pantry_items) {
             shared_state.pantry_items = [];
         }
         return shared_state.pantry_items;
     }
 
+    async def set_pantry_items(items: list) -> None {
+        shared_state.pantry_items = items;
+        if on_pantry_change {
+            await on_pantry_change(items);
+        }
+    }
+
     def visible_recipes() -> list {
+        if not is_listish(recipes) {
+            return [];
+        }
         if filter_mode == "favorites" {
             return recipes.filter(
                 lambda recipe: dict -> bool { return recipe.favorite; }
@@ -160,13 +213,13 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
         };
     }
 
-    def add_pantry_item() -> None {
+    async def add_pantry_item() -> None {
         if not pantry_name.trim() {
             status_text = "Pantry item name is required.";
             return;
         }
 
-        shared_state.pantry_items = pantry_items_ref().concat([{
+        await set_pantry_items(pantry_items_ref().concat([{
             "name": pantry_name.trim(),
             "quantity": to_num(pantry_quantity, 1.0),
             "unit": pantry_unit,
@@ -174,7 +227,7 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
             "protein": to_num(pantry_protein, 0.0),
             "carb": to_num(pantry_carb, 0.0),
             "fat": to_num(pantry_fat, 0.0)
-        }]);
+        }]));
 
         pantry_name = "";
         pantry_quantity = "1";
@@ -186,9 +239,11 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
         status_text = "Pantry ingredient added.";
     }
 
-    def remove_pantry_item(name: str) -> None {
-        shared_state.pantry_items = pantry_items_ref().filter(
-            lambda item: dict -> bool { return item.name != name; }
+    async def remove_pantry_item(name: str) -> None {
+        await set_pantry_items(
+            pantry_items_ref().filter(
+                lambda item: dict -> bool { return item.name != name; }
+            )
         );
     }
 
@@ -217,6 +272,13 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
         try {
             profile_result = root spawn GetUserProfile();
             profile_out = first_report_payload(profile_result);
+            if profile_out and profile_out.error {
+                err_text = String(profile_out.error);
+                status_text = "Profile lookup failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
             if not profile_out or Object.keys(profile_out).length == 0 {
                 status_text = "No saved profile found. Save profile in User Profile tab first.";
                 loading = false;
@@ -227,6 +289,8 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
             macro_out = first_report_payload(macro_result);
             if macro_out.ok {
                 macro_needs = macro_out;
+            } elif macro_out and macro_out.error {
+                maybe_trigger_auth_error(String(macro_out.error));
             }
 
             recipe_result = root spawn GenerateRecipeFromPantry(
@@ -235,7 +299,9 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
             );
             recipe_out = first_report_payload(recipe_result);
             if recipe_out.ok == false {
-                status_text = "Recipe generation failed: " + String(recipe_out.error or "unknown error");
+                err_text = String(recipe_out.error or "unknown error");
+                status_text = "Recipe generation failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
                 loading = false;
                 return;
             }
@@ -254,7 +320,9 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
 
             status_text = "Recipe generated with API.";
         } except Exception as e {
-            status_text = "Recipe generation failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Recipe generation failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
@@ -272,7 +340,9 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
                 status_text = "No saved recipe found.";
             }
         } except Exception as e {
-            status_text = "Load failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Load failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
@@ -285,7 +355,9 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
             generated_recipe = {};
             status_text = "Saved recipe cleared.";
         } except Exception as e {
-            status_text = "Clear failed: " + e.toString();
+            err_text = e.toString();
+            status_text = "Clear failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
         }
         loading = false;
     }
@@ -323,13 +395,27 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
                 <button onClick={clear_saved_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #991b1b", "background": "#fee2e2", "fontWeight": "700"}}>Clear Saved Recipe (API)</button>
             </div>
 
-            <div style={{"display": "grid", "gridTemplateColumns": "minmax(0, 1.3fr) minmax(0, 1fr)", "gap": "12px"}}>
+            <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))", "gap": "12px"}}>
                 <div style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff", "display": "grid", "gap": "10px"}}>
                     <h3 style={{"margin": "0"}}>Pantry Inputs For Recipe API</h3>
-                    <div style={{"display": "grid", "gridTemplateColumns": "2fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr", "gap": "8px"}}>
-                        <input value={pantry_name} onChange={lambda e: any -> None { pantry_name = e.target.value; }} placeholder="name" />
-                        <input value={pantry_quantity} onChange={lambda e: any -> None { pantry_quantity = e.target.value; }} placeholder="qty" />
-                        <select value={pantry_unit} onChange={lambda e: any -> None { pantry_unit = e.target.value; }}>
+                    <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(110px, 1fr))", "gap": "8px", "alignItems": "end"}}>
+                        <input
+                            value={pantry_name}
+                            onChange={lambda e: any -> None { pantry_name = e.target.value; }}
+                            placeholder="name"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px", "gridColumn": "span 2"}}
+                        />
+                        <input
+                            value={pantry_quantity}
+                            onChange={lambda e: any -> None { pantry_quantity = e.target.value; }}
+                            placeholder="qty"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <select
+                            value={pantry_unit}
+                            onChange={lambda e: any -> None { pantry_unit = e.target.value; }}
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        >
                             <option value="PIECE">PIECE</option>
                             <option value="LB">LB</option>
                             <option value="OZ">OZ</option>
@@ -339,38 +425,79 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
                             <option value="CLOVE">CLOVE</option>
                             <option value="BUNCH">BUNCH</option>
                         </select>
-                        <input value={pantry_cost} onChange={lambda e: any -> None { pantry_cost = e.target.value; }} placeholder="cost" />
-                        <input value={pantry_protein} onChange={lambda e: any -> None { pantry_protein = e.target.value; }} placeholder="protein" />
-                        <input value={pantry_carb} onChange={lambda e: any -> None { pantry_carb = e.target.value; }} placeholder="carb" />
-                        <input value={pantry_fat} onChange={lambda e: any -> None { pantry_fat = e.target.value; }} placeholder="fat" />
-                        <button onClick={add_pantry_item}>Add</button>
+                        <input
+                            value={pantry_cost}
+                            onChange={lambda e: any -> None { pantry_cost = e.target.value; }}
+                            placeholder="cost"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <input
+                            value={pantry_protein}
+                            onChange={lambda e: any -> None { pantry_protein = e.target.value; }}
+                            placeholder="protein"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <input
+                            value={pantry_carb}
+                            onChange={lambda e: any -> None { pantry_carb = e.target.value; }}
+                            placeholder="carb"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <input
+                            value={pantry_fat}
+                            onChange={lambda e: any -> None { pantry_fat = e.target.value; }}
+                            placeholder="fat"
+                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
+                        />
+                        <button
+                            onClick={add_pantry_item}
+                            style={{"padding": "8px", "borderRadius": "8px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}
+                        >
+                            Add
+                        </button>
                     </div>
 
                     {(
                         <div style={{"opacity": "0.75"}}>No pantry items yet.</div>
                     ) if pantry_items_ref().length == 0 else (
-                        <table style={{"width": "100%", "borderCollapse": "collapse"}}>
-                            <thead>
-                                <tr>
-                                    <th>Name</th><th>Qty</th><th>Unit</th><th>Cost</th><th>P</th><th>C</th><th>F</th><th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {pantry_items_ref().map(
-                                    lambda item: dict -> JsxElement { return
-                                        <tr key={item.name}>
-                                            <td>{item.name}</td>
-                                            <td>{item.quantity}</td>
-                                            <td>{item.unit}</td>
-                                            <td>{item.cost}</td>
-                                            <td>{item.protein}</td>
-                                            <td>{item.carb}</td>
-                                            <td>{item.fat}</td>
-                                            <td><button onClick={lambda -> None { remove_pantry_item(item.name); }}>Remove</button></td>
-                                        </tr>; }
-                                )}
-                            </tbody>
-                        </table>
+                        <div style={{"overflowX": "auto"}}>
+                            <table style={{"width": "100%", "borderCollapse": "collapse"}}>
+                                <thead>
+                                    <tr style={{"background": "#eff6ff"}}>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Name</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Qty</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Unit</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Cost</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>P</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>C</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>F</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {pantry_items_ref().map(
+                                        lambda item: dict -> JsxElement { return
+                                            <tr key={item.name} style={{"borderTop": "1px solid #e2e8f0"}}>
+                                                <td style={{"padding": "8px"}}>{item.name}</td>
+                                                <td style={{"padding": "8px"}}>{item.quantity}</td>
+                                                <td style={{"padding": "8px"}}>{item.unit}</td>
+                                                <td style={{"padding": "8px"}}>{item.cost}</td>
+                                                <td style={{"padding": "8px"}}>{item.protein}</td>
+                                                <td style={{"padding": "8px"}}>{item.carb}</td>
+                                                <td style={{"padding": "8px"}}>{item.fat}</td>
+                                                <td style={{"padding": "8px"}}>
+                                                    <button
+                                                        onClick={lambda -> None { remove_pantry_item(item.name); }}
+                                                        style={{"padding": "6px 8px", "borderRadius": "8px", "border": "1px solid #991b1b", "background": "#fee2e2"}}
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                </td>
+                                            </tr>; }
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
                     )}
                 </div>
 
@@ -391,15 +518,15 @@ def:pub RecipesTab(shared_state: dict = {}) -> JsxElement {
 
             <div style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff"}}>
                 <h3 style={{"margin": "0 0 8px 0"}}>Generated Recipe (API)</h3>
-                <pre style={{"margin": "0", "background": "#0f172a", "color": "#e2e8f0", "borderRadius": "10px", "padding": "10px", "overflowX": "auto"}}>{JSON.stringify(generated_recipe, None, 2)}</pre>
-                {(
-                    <ol>
-                        {generated_recipe.instructions.map(
-                            lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
-                        )}
-                    </ol>
-                ) if (generated_recipe and generated_recipe.instructions and generated_recipe.instructions.length > 0) else <div /> }
-            </div>
+                    <pre style={{"margin": "0", "background": "#0f172a", "color": "#e2e8f0", "borderRadius": "10px", "padding": "10px", "overflowX": "auto"}}>{JSON.stringify(generated_recipe, None, 2)}</pre>
+                    {(
+                        <ol>
+                            {generated_recipe.instructions.map(
+                                lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
+                            )}
+                        </ol>
+                    ) if (generated_recipe and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
+                </div>
 
             <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
                 <button onClick={lambda -> None { filter_mode = "all"; }} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": ("#dbeafe" if filter_mode == "all" else "#ffffff")}}>All</button>

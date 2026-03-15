@@ -1,4 +1,8 @@
-def:pub NutritionTab() -> JsxElement {
+def:pub NutritionTab(
+    shared_state: dict = {},
+    on_nutrition_change: any = None,
+    is_hydrating: bool = false
+) -> JsxElement {
     has selected_day_index: int = 0;
     has weekly_history: list = [
         {"day": "Mon", "protein": 82, "carbs": 71, "fat": 66, "move": 74},
@@ -9,6 +13,52 @@ def:pub NutritionTab() -> JsxElement {
         {"day": "Sat", "protein": 84, "carbs": 72, "fat": 71, "move": 86},
         {"day": "Sun", "protein": 90, "carbs": 75, "fat": 73, "move": 84}
     ];
+
+    def is_listish(raw: any) -> bool {
+        if raw == None {
+            return false;
+        }
+        if Array.isArray(raw) {
+            return true;
+        }
+        try {
+            raw_len = parseInt(String(raw.length));
+            if isNaN(raw_len) or raw_len < 0 {
+                return false;
+            }
+            probe = raw.map(lambda item: any -> any : item);
+            if Array.isArray(probe) {
+                return true;
+            }
+        } except Exception as _e {
+            0;
+        }
+        return false;
+    }
+
+    def push_nutrition_state() -> None {
+        shared_state.nutrition_history = weekly_history;
+        shared_state.nutrition_selected_day_index = selected_day_index;
+        if on_nutrition_change and not is_hydrating {
+            on_nutrition_change({
+                "weekly_history": weekly_history,
+                "selected_day_index": selected_day_index
+            });
+        }
+    }
+
+    can with entry {
+        if shared_state.nutrition_history and is_listish(shared_state.nutrition_history) and shared_state.nutrition_history.length > 0 {
+            weekly_history = shared_state.nutrition_history;
+        }
+        if shared_state.nutrition_selected_day_index != None {
+            idx = parseInt(String(shared_state.nutrition_selected_day_index));
+            if not isNaN(idx) and idx >= 0 and idx < weekly_history.length {
+                selected_day_index = idx;
+            }
+        }
+        push_nutrition_state();
+    }
 
     def selected_day() -> dict {
         return weekly_history[selected_day_index];
@@ -102,9 +152,13 @@ def:pub NutritionTab() -> JsxElement {
                         <button
                             key={day_item.day}
                             onClick={lambda -> None {
-                                selected_day_index = weekly_history.findIndex(
+                                next_idx = weekly_history.findIndex(
                                     lambda x: dict -> bool { return x.day == day_item.day; }
                                 );
+                                if next_idx >= 0 {
+                                    selected_day_index = next_idx;
+                                    push_nutrition_state();
+                                }
                             }}
                             style={{
                                 "padding": "8px 10px",

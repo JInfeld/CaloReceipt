@@ -30,6 +30,12 @@ import from user {
 import from ingredient {
     GenerateRecipeFromPantry,
     ListGeneratedRecipe,
+    ListRecipeHistory,
+    SetRecipeFavorite,
+    MarkRecipeMade,
+    ComputePantryAfterRecipe,
+    SaveRecipeRankingBatch,
+    DeleteSavedRecipe,
     ClearGeneratedRecipe,
     ParseReceiptImageToPantry,
     ParseReceiptTextToPantry

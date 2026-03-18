@@ -22,6 +22,7 @@ obj user {
     has weight: float;
     has fitness_level: FitnessLevel;
     has goal: Goal;
+    has goal_weight: float = 0.0;
     has username: str = "";
     has dietary_restrictions: list[str] = [];
     has allergies: list[str] = [];
@@ -71,6 +72,7 @@ def:pub user_from_dict(profile: dict) -> user {
         sex=sex_val,
         height=float(profile["height"]),
         weight=float(profile["weight"]),
+        goal_weight=float(profile.get("goal_weight", 0.0)),
         username=username_text,
         dietary_restrictions=profile["dietary_restrictions"],
         allergies=profile["allergies"],
@@ -81,6 +83,7 @@ def:pub user_from_dict(profile: dict) -> user {
 
 sem user.height = "User height in inches";
 sem user.weight = "User weight in pounds";
+sem user.goal_weight = "Desired body weight in pounds; use 0 when the user does not have a target weight";
 sem user.dietary_restrictions = "Dietary preferences/restrictions such as vegan, halal, kosher, lactose intolerance, gluten-free";
 sem user.allergies = "Food allergies or intolerances";
 sem user.fitness_level = "Typical weekly activity/training level";
@@ -116,6 +119,7 @@ node UserProfile {
         allergies: list[str],
         fitness_level: FitnessLevel,
         goal: Goal,
+        goal_weight: float = 0.0,
         username: str = "";
 }
 
@@ -139,6 +143,7 @@ walker SaveUserProfile {
                 allergies=profile_obj.allergies,
                 fitness_level=profile_obj.fitness_level,
                 goal=profile_obj.goal,
+                goal_weight=profile_obj.goal_weight,
                 username=profile_obj.username
             );
             report {"saved": True};
@@ -167,6 +172,7 @@ walker GetUserProfile {
             "sex": str(here.sex).split(".")[-1].lower(),
             "height": here.height,
             "weight": here.weight,
+            "goal_weight": here.goal_weight,
             "username": here.username,
             "dietary_restrictions": here.dietary_restrictions,
             "allergies": here.allergies,
@@ -217,6 +223,7 @@ walker GenerateUserMacroNeeds {
                     sex=here.sex,
                     height=here.height,
                     weight=here.weight,
+                    goal_weight=here.goal_weight,
                     username=here.username,
                     dietary_restrictions=here.dietary_restrictions,
                     allergies=here.allergies,

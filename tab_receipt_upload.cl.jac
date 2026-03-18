@@ -6,10 +6,11 @@ sv import from ingredient {
 def:pub ReceiptUploadTab(
     shared_state: dict = {},
     on_auth_error: any = None,
-    on_pantry_change: any = None
+    on_pantry_change: any = None,
+    is_active: bool = true
 ) -> JsxElement {
     has loading: bool = false;
-    has status_text: str = "Upload a receipt image, parse it with API, review items, and add to pantry.";
+    has status_text: str = "Capture or upload a receipt image, parse it with API, review items, and add to pantry.";
     has ocr_last_duration_ms: int = 0;
     has ocr_timer_display: str = "Last OCR time: --";
     has request_counter: int = 0;
@@ -17,7 +18,12 @@ def:pub ReceiptUploadTab(
 
     has receipt_file_name: str = "";
     has receipt_image_b64: str = "";
+    has receipt_image_preview_url: str = "";
     has receipt_image_mime_type: str = "image/jpeg";
+    has camera_stream: any = None;
+    has camera_open: bool = false;
+    has camera_starting: bool = false;
+    has camera_error_text: str = "";
 
     has extracted_text: str = "";
     has parsed_rows: list = [];
@@ -31,6 +37,79 @@ def:pub ReceiptUploadTab(
     def format_elapsed_label(ms: int) -> str {
         sec_text = String((ms / 1000.0).toFixed(2));
         return sec_text.concat("s");
+    }
+
+    def camera_video_id() -> str {
+        return "receipt-camera-video";
+    }
+
+    def camera_canvas_id() -> str {
+        return "receipt-camera-canvas";
+    }
+
+    def camera_video_el() -> any {
+        try {
+            return window.document.getElementById(camera_video_id());
+        } except Exception as _e {
+            return None;
+        }
+    }
+
+    def camera_canvas_el() -> any {
+        try {
+            return window.document.getElementById(camera_canvas_id());
+        } except Exception as _e {
+            return None;
+        }
+    }
+
+    def in_app_camera_supported() -> bool {
+        try {
+            return (
+                window.navigator and
+                window.navigator.mediaDevices and
+                window.navigator.mediaDevices.getUserMedia
+            );
+        } except Exception as _e {
+            return false;
+        }
+    }
+
+    def has_receipt_preview() -> bool {
+        return String(receipt_image_preview_url or "").trim().length > 0;
+    }
+
+    def stop_camera_stream() -> None {
+        if camera_stream and camera_stream.getTracks {
+            try {
+                tracks = camera_stream.getTracks();
+                for track in tracks {
+                    track.stop();
+                }
+            } except Exception as _e {
+                0;
+            }
+        }
+        camera_stream = None;
+        video_el = camera_video_el();
+        if video_el {
+            try {
+                video_el.pause();
+            } except Exception as _e {
+                0;
+            }
+            try {
+                video_el.srcObject = None;
+            } except Exception as _e {
+                0;
+            }
+        }
+    }
+
+    def close_camera() -> None {
+        stop_camera_stream();
+        camera_open = false;
+        camera_starting = false;
     }
 
     def first_report_payload(raw_result: dict) -> dict {
@@ -96,6 +175,21 @@ def:pub ReceiptUploadTab(
         if text == "OZ" {
             return "OZ";
         }
+        if text == "CUP" {
+            return "CUP";
+        }
+        if text == "TBSP" {
+            return "TBSP";
+        }
+        if text == "TSP" {
+            return "TSP";
+        }
+        if text == "CLOVE" {
+            return "CLOVE";
+        }
+        if text == "BUNCH" {
+            return "BUNCH";
+        }
         return "PIECE";
     }
 
@@ -121,6 +215,28 @@ def:pub ReceiptUploadTab(
         return parsed;
     }
 
+    def receipt_row_payload(
+        row_id: int,
+        name: str,
+        quantity_text: str,
+        unit: str,
+        cost: any = 0.0,
+        protein: any = 0.0,
+        carb: any = 0.0,
+        fat: any = 0.0
+    ) -> dict {
+        return {
+            "row_id": row_id,
+            "name": name,
+            "quantity_text": quantity_text,
+            "unit": normalize_unit(unit),
+            "cost": num_or_zero(cost),
+            "protein": num_or_zero(protein),
+            "carb": num_or_zero(carb),
+            "fat": num_or_zero(fat)
+        };
+    }
+
     def pantry_items_ref() -> list {
         if not shared_state.pantry_items or not is_listish(shared_state.pantry_items) {
             shared_state.pantry_items = [];
@@ -131,7 +247,7 @@ def:pub ReceiptUploadTab(
     async def set_pantry_items(items: list) -> None {
         shared_state.pantry_items = items;
         if on_pantry_change {
-            0;
+            await on_pantry_change(items);
         }
     }
 
@@ -150,9 +266,12 @@ def:pub ReceiptUploadTab(
         parsed_rows = [];
         receipt_parse_payload = {};
         if clear_file {
+            close_camera();
             receipt_file_name = "";
             receipt_image_b64 = "";
+            receipt_image_preview_url = "";
             receipt_image_mime_type = "image/jpeg";
+            camera_error_text = "";
         }
     }
 
@@ -192,12 +311,16 @@ def:pub ReceiptUploadTab(
             if not item_name {
                 continue;
             }
-            rows = rows.concat([{
-                "row_id": row_id,
-                "name": item_name,
-                "quantity_text": String(item.quantity or 1),
-                "unit": normalize_unit(String(item.unit or "PIECE"))
-            }]);
+            rows = rows.concat([receipt_row_payload(
+                row_id,
+                item_name,
+                String(item.quantity or 1),
+                String(item.unit or "PIECE"),
+                item.cost,
+                item.protein,
+                item.carb,
+                item.fat
+            )]);
             row_id += 1;
         }
         parsed_rows = rows;
@@ -223,12 +346,7 @@ def:pub ReceiptUploadTab(
                 item_name = tokens.slice(0, tokens.length - 1).join(" ");
             }
 
-            rows = rows.concat([{
-                "row_id": next_id,
-                "name": item_name,
-                "quantity_text": qty_text,
-                "unit": "PIECE"
-            }]);
+            rows = rows.concat([receipt_row_payload(next_id, item_name, qty_text, "PIECE")]);
             next_id += 1;
         }
         return rows;
@@ -241,22 +359,112 @@ def:pub ReceiptUploadTab(
 
     def add_empty_item_row() -> None {
         next_id = parsed_rows.length + 1;
-        parsed_rows = parsed_rows.concat([{
-            "row_id": next_id,
-            "name": "",
-            "quantity_text": "1",
-            "unit": "PIECE"
-        }]);
+        parsed_rows = parsed_rows.concat([receipt_row_payload(next_id, "", "1", "PIECE")]);
+    }
+
+    async def start_camera() -> None {
+        if camera_starting {
+            return;
+        }
+        if not in_app_camera_supported() {
+            camera_error_text = "In-app camera is not available in this browser. Upload a photo instead.";
+            status_text = camera_error_text;
+            return;
+        }
+
+        camera_error_text = "";
+        camera_starting = true;
+        camera_open = true;
+        stop_camera_stream();
+        status_text = "Requesting camera access...";
+        try {
+            stream = await window.navigator.mediaDevices.getUserMedia(
+                {
+                    "video": {
+                        "facingMode": {"ideal": "environment"},
+                        "width": {"ideal": 1920},
+                        "height": {"ideal": 1080}
+                    },
+                    "audio": false
+                }
+            );
+            camera_stream = stream;
+            video_el = camera_video_el();
+            if not video_el {
+                close_camera();
+                camera_error_text = "Camera preview could not be initialized.";
+                status_text = camera_error_text;
+                return;
+            }
+            video_el.srcObject = stream;
+            try {
+                await video_el.play();
+            } except Exception as _e {
+                0;
+            }
+            camera_starting = false;
+            status_text = "Camera live. Hold the receipt inside the frame and tap Take Photo.";
+        } except Exception as e {
+            close_camera();
+            camera_error_text = "Camera access failed: " + e.toString();
+            status_text = camera_error_text;
+        }
+    }
+
+    def capture_camera_photo() -> None {
+        if not camera_open {
+            status_text = "Open the camera before taking a photo.";
+            return;
+        }
+        video_el = camera_video_el();
+        canvas_el = camera_canvas_el();
+        if not video_el or not canvas_el {
+            status_text = "Camera capture surface is unavailable.";
+            return;
+        }
+        frame_width = parseInt(String(video_el.videoWidth or 0));
+        frame_height = parseInt(String(video_el.videoHeight or 0));
+        if isNaN(frame_width) or isNaN(frame_height) or frame_width < 1 or frame_height < 1 {
+            status_text = "Camera is still warming up. Try again in a moment.";
+            return;
+        }
+
+        canvas_el.width = frame_width;
+        canvas_el.height = frame_height;
+        draw_ctx = canvas_el.getContext("2d");
+        if not draw_ctx {
+            status_text = "Camera capture failed.";
+            return;
+        }
+        draw_ctx.drawImage(video_el, 0, 0, frame_width, frame_height);
+        data_url = canvas_el.toDataURL("image/jpeg", 0.92);
+        receipt_image_preview_url = data_url;
+        receipt_image_b64 = data_url.split(",")[1];
+        receipt_image_mime_type = "image/jpeg";
+        receipt_file_name = ["receipt-camera-", String(now_ms()), ".jpg"].join("");
+        camera_error_text = "";
+        close_camera();
+        status_text = "Receipt photo captured. Click Parse Receipt (API).";
+    }
+
+    def clear_loaded_receipt_image() -> None {
+        close_camera();
+        receipt_file_name = "";
+        receipt_image_b64 = "";
+        receipt_image_preview_url = "";
+        receipt_image_mime_type = "image/jpeg";
+        camera_error_text = "";
+        status_text = "Receipt image cleared.";
     }
 
     def on_receipt_file_change(e: any) -> None {
         files = e.target.files;
         if not files or files.length == 0 {
-            receipt_file_name = "";
-            receipt_image_b64 = "";
             return;
         }
 
+        close_camera();
+        camera_error_text = "";
         file = files[0];
         receipt_file_name = file.name;
         if file.type and file.type.trim() {
@@ -268,6 +476,7 @@ def:pub ReceiptUploadTab(
         reader = Reflect.construct(FileReader, []);
         reader.onload = lambda ev: any -> None {
             raw_data_url = ev.target.result;
+            receipt_image_preview_url = raw_data_url;
             receipt_image_b64 = raw_data_url.split(",")[1];
             status_text = "Receipt image loaded. Click Parse Receipt (API).";
         };
@@ -364,12 +573,16 @@ def:pub ReceiptUploadTab(
         next_rows: list = [];
         for row in parsed_rows {
             if row.row_id == row_id {
-                next_rows = next_rows.concat([{
-                    "row_id": row.row_id,
-                    "name": value,
-                    "quantity_text": row.quantity_text,
-                    "unit": row.unit
-                }]);
+                next_rows = next_rows.concat([receipt_row_payload(
+                    row.row_id,
+                    value,
+                    row.quantity_text,
+                    row.unit,
+                    row.cost,
+                    row.protein,
+                    row.carb,
+                    row.fat
+                )]);
             } else {
                 next_rows = next_rows.concat([row]);
             }
@@ -381,12 +594,16 @@ def:pub ReceiptUploadTab(
         next_rows: list = [];
         for row in parsed_rows {
             if row.row_id == row_id {
-                next_rows = next_rows.concat([{
-                    "row_id": row.row_id,
-                    "name": row.name,
-                    "quantity_text": value,
-                    "unit": row.unit
-                }]);
+                next_rows = next_rows.concat([receipt_row_payload(
+                    row.row_id,
+                    row.name,
+                    value,
+                    row.unit,
+                    row.cost,
+                    row.protein,
+                    row.carb,
+                    row.fat
+                )]);
             } else {
                 next_rows = next_rows.concat([row]);
             }
@@ -398,12 +615,16 @@ def:pub ReceiptUploadTab(
         next_rows: list = [];
         for row in parsed_rows {
             if row.row_id == row_id {
-                next_rows = next_rows.concat([{
-                    "row_id": row.row_id,
-                    "name": row.name,
-                    "quantity_text": row.quantity_text,
-                    "unit": normalize_unit(value)
-                }]);
+                next_rows = next_rows.concat([receipt_row_payload(
+                    row.row_id,
+                    row.name,
+                    row.quantity_text,
+                    value,
+                    row.cost,
+                    row.protein,
+                    row.carb,
+                    row.fat
+                )]);
             } else {
                 next_rows = next_rows.concat([row]);
             }
@@ -427,7 +648,11 @@ def:pub ReceiptUploadTab(
             staged = staged.concat([{
                 "name": row_name,
                 "quantity": row.quantity_text.trim(),
-                "unit": normalize_unit(row.unit)
+                "unit": normalize_unit(row.unit),
+                "cost": num_or_zero(row.cost),
+                "protein": num_or_zero(row.protein),
+                "carb": num_or_zero(row.carb),
+                "fat": num_or_zero(row.fat)
             }]);
         }
 
@@ -479,6 +704,16 @@ def:pub ReceiptUploadTab(
         add_debug("pantry:add", {"added_count": String(staged.length), "pantry_size": String(pantry_items_ref().length)});
     }
 
+    can with [is_active] entry {
+        if not is_active {
+            close_camera();
+        }
+    }
+
+    can with exit {
+        close_camera();
+    }
+
     return
         <div
             style={{
@@ -494,7 +729,7 @@ def:pub ReceiptUploadTab(
                 <div>
                     <h2 style={{"margin": "0"}}>Receipt Upload</h2>
                     <p style={{"margin": "6px 0 0 0", "opacity": "0.76"}}>
-                        Extracted receipt items are listed item-by-item and fully editable.
+                        Use the in-app camera for mobile-style capture, or upload from your computer when a webcam is not ideal.
                     </p>
                 </div>
                 <div style={{"background": "#eff6ff", "border": "1px solid #bfdbfe", "borderRadius": "10px", "padding": "8px 10px", "fontWeight": "700"}}>
@@ -509,8 +744,145 @@ def:pub ReceiptUploadTab(
 
             <div style={{"display": "grid", "gridTemplateColumns": "minmax(0, 1fr) minmax(0, 1fr)", "gap": "12px"}}>
                 <div style={{"display": "grid", "gap": "10px"}}>
-                    <label style={{"fontWeight": "700"}}>1) Upload Receipt</label>
-                    <input type="file" accept="image/*" onChange={on_receipt_file_change} />
+                    <label style={{"fontWeight": "700"}}>1) Capture Or Upload Receipt</label>
+                    <div
+                        style={{
+                            "display": "grid",
+                            "gap": "12px",
+                            "padding": "14px",
+                            "borderRadius": "16px",
+                            "border": "1px solid #d9e7f6",
+                            "background": "linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%)"
+                        }}
+                    >
+                        <div
+                            style={{
+                                "position": "relative",
+                                "minHeight": "320px",
+                                "borderRadius": "18px",
+                                "overflow": "hidden",
+                                "background": "#0f172a",
+                                "border": "1px solid #c7d8ef"
+                            }}
+                        >
+                            <video
+                                id={camera_video_id()}
+                                autoPlay={true}
+                                playsInline={true}
+                                muted={true}
+                                style={{
+                                    "display": ("block" if camera_open else "none"),
+                                    "width": "100%",
+                                    "height": "100%",
+                                    "objectFit": "cover",
+                                    "minHeight": "320px",
+                                    "background": "#0f172a"
+                                }}
+                            />
+                            <img
+                                src={receipt_image_preview_url}
+                                alt="Receipt preview"
+                                style={{
+                                    "display": ("block" if (not camera_open) and has_receipt_preview() else "none"),
+                                    "width": "100%",
+                                    "height": "100%",
+                                    "objectFit": "cover",
+                                    "minHeight": "320px",
+                                    "background": "#0f172a"
+                                }}
+                            />
+                            <div
+                                style={{
+                                    "display": ("grid" if (not camera_open) and not has_receipt_preview() else "none"),
+                                    "placeItems": "center",
+                                    "padding": "28px",
+                                    "minHeight": "320px",
+                                    "color": "#e2e8f0",
+                                    "textAlign": "center",
+                                    "gap": "10px",
+                                    "background": "radial-gradient(circle at top, rgba(59,130,246,0.25) 0%, rgba(15,23,42,0) 38%), linear-gradient(180deg, #0f172a 0%, #111827 100%)"
+                                }}
+                            >
+                                <div style={{"fontSize": "1.05rem", "fontWeight": "700"}}>Custom Receipt Camera</div>
+                                <div style={{"maxWidth": "260px", "lineHeight": "1.5"}}>
+                                    {("Tap Open Camera and center the full receipt inside the frame." if in_app_camera_supported() else "This browser does not support in-app camera access. Upload a receipt image instead.")}
+                                </div>
+                            </div>
+                            <div
+                                style={{
+                                    "position": "absolute",
+                                    "inset": "18px",
+                                    "border": "2px solid rgba(255,255,255,0.75)",
+                                    "borderRadius": "20px",
+                                    "pointerEvents": "none",
+                                    "boxShadow": "0 0 0 1px rgba(15,23,42,0.22) inset"
+                                }}
+                            />
+                            <div
+                                style={{
+                                    "position": "absolute",
+                                    "left": "18px",
+                                    "right": "18px",
+                                    "bottom": "16px",
+                                    "display": "flex",
+                                    "justifyContent": "space-between",
+                                    "alignItems": "center",
+                                    "gap": "10px",
+                                    "pointerEvents": "none"
+                                }}
+                            >
+                                <div style={{"padding": "7px 10px", "borderRadius": "999px", "background": "rgba(15,23,42,0.72)", "color": "#f8fafc", "fontWeight": "700"}}>
+                                    {("Live Camera" if camera_open else ("Photo Ready" if has_receipt_preview() else "Awaiting Capture"))}
+                                </div>
+                                <div style={{"padding": "7px 10px", "borderRadius": "999px", "background": "rgba(15,23,42,0.72)", "color": "#cbd5e1", "fontSize": "0.9rem"}}>
+                                    {("Landscape photos work best for long receipts" if camera_open else "Upload remains available on desktop")}
+                                </div>
+                            </div>
+                        </div>
+                        <canvas id={camera_canvas_id()} style={{"display": "none"}} />
+                        <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
+                            <button
+                                onClick={start_camera}
+                                disabled={camera_starting}
+                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #0f766e", "background": "#ccfbf1", "fontWeight": "700"}}
+                            >
+                                {("Starting..." if camera_starting else ("Retake Photo" if has_receipt_preview() else "Open Camera"))}
+                            </button>
+                            <button
+                                onClick={capture_camera_photo}
+                                disabled={(not camera_open) or camera_starting}
+                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#dbeafe", "fontWeight": "700"}}
+                            >
+                                Take Photo
+                            </button>
+                            <button
+                                onClick={close_camera}
+                                disabled={not camera_open}
+                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff", "fontWeight": "700"}}
+                            >
+                                Close Camera
+                            </button>
+                            <button
+                                onClick={clear_loaded_receipt_image}
+                                disabled={(not has_receipt_preview()) and (receipt_image_b64 == "")}
+                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #fecaca", "background": "#fff1f2", "fontWeight": "700"}}
+                            >
+                                Clear Image
+                            </button>
+                        </div>
+                        <div style={{"display": "grid", "gap": "6px"}}>
+                            <label style={{"fontWeight": "700"}}>Upload Instead</label>
+                            <input type="file" accept="image/*" capture="environment" onChange={on_receipt_file_change} />
+                            <div style={{"opacity": "0.72", "fontSize": "0.94rem"}}>
+                                Desktop users can upload screenshots or photos. Mobile browsers may still offer the native camera here as a fallback.
+                            </div>
+                        </div>
+                        {(
+                            <div style={{"padding": "10px 12px", "borderRadius": "12px", "border": "1px solid #fecaca", "background": "#fff1f2", "color": "#991b1b", "fontWeight": "600"}}>
+                                {camera_error_text}
+                            </div>
+                        ) if camera_error_text else None}
+                    </div>
                     <label style={{"fontWeight": "700"}}>2) Raw OCR Text (optional / editable)</label>
                     <textarea
                         value={extracted_text}
@@ -573,6 +945,11 @@ def:pub ReceiptUploadTab(
                                         <option value="PIECE">PIECE</option>
                                         <option value="OZ">OZ</option>
                                         <option value="LB">LB</option>
+                                        <option value="CUP">CUP</option>
+                                        <option value="TBSP">TBSP</option>
+                                        <option value="TSP">TSP</option>
+                                        <option value="CLOVE">CLOVE</option>
+                                        <option value="BUNCH">BUNCH</option>
                                     </select>
                                     <button onClick={lambda -> None { remove_row(row.row_id); }} style={{"border": "1px solid #fecaca", "background": "#fff1f2", "borderRadius": "8px", "padding": "6px 8px"}}>Remove</button>
                                 </div>; }

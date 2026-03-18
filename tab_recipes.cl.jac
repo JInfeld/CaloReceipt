@@ -1,6 +1,12 @@
 sv import from ingredient {
     GenerateRecipeFromPantry,
     ListGeneratedRecipe,
+    ListRecipeHistory,
+    SetRecipeFavorite,
+    MarkRecipeMade,
+    ComputePantryAfterRecipe,
+    SaveRecipeRankingBatch,
+    DeleteSavedRecipe,
     ClearGeneratedRecipe
 }
 sv import from user {
@@ -17,24 +23,7 @@ def:pub RecipesTab(
     has loading: bool = false;
     has status_text: str = "Recipe API ready.";
 
-    has recipes: list = [
-        {
-            "id": 1,
-            "title": "Lemon Garlic Chicken Bowl",
-            "last_cooked": "2 days ago",
-            "rating": 4,
-            "favorite": true,
-            "notes": "Great post-workout meal"
-        },
-        {
-            "id": 2,
-            "title": "Tofu Veggie Stir Fry",
-            "last_cooked": "5 days ago",
-            "rating": 3,
-            "favorite": false,
-            "notes": "Needed more sauce"
-        }
-    ];
+    has recipes: list = [];
 
     has pantry_name: str = "";
     has pantry_quantity: str = "1";
@@ -47,6 +36,14 @@ def:pub RecipesTab(
     has generated_recipe: dict = {};
     has macro_needs: dict = {};
     has new_recipe_idea: dict = {};
+    has active_rank_recipe_id: str = "";
+    has active_rank_tier: str = "";
+    has active_rank_candidates: list = [];
+    has active_rank_low: int = 0;
+    has active_rank_high: int = -1;
+    has active_rank_mid: int = -1;
+    has pending_rate_recipe_id: str = "";
+    has show_made_confirm: bool = false;
 
     def first_report_payload(raw_result: dict) -> dict {
         if raw_result.reports and raw_result.reports.length > 0 {
@@ -64,6 +61,11 @@ def:pub RecipesTab(
         return raw_result;
     }
 
+    def now_ms() -> int {
+        now_obj = Reflect.construct(Date, []);
+        return parseInt(now_obj.getTime().toString());
+    }
+
     def is_auth_error_text(text: str) -> bool {
         lower = String(text or "").toLowerCase();
         return (
@@ -79,6 +81,32 @@ def:pub RecipesTab(
         if on_auth_error and is_auth_error_text(text) {
             on_auth_error("Session expired. Please sign in again.");
         }
+    }
+
+    def event_attr(e: any, attr_name: str) -> str {
+        try {
+            cur = e.currentTarget;
+            if cur {
+                raw = cur.getAttribute(attr_name);
+                if raw != None {
+                    return String(raw);
+                }
+            }
+        } except Exception as _e {
+            0;
+        }
+        try {
+            tgt = e.target;
+            if tgt {
+                raw = tgt.getAttribute(attr_name);
+                if raw != None {
+                    return String(raw);
+                }
+            }
+        } except Exception as _e {
+            0;
+        }
+        return "";
     }
 
     def to_num(value: str, fallback: float = 0.0) -> float {
@@ -125,57 +153,507 @@ def:pub RecipesTab(
         }
     }
 
+    def to_int(raw: any, fallback: int = 0) -> int {
+        parsed = parseInt(String(raw));
+        if isNaN(parsed) {
+            return fallback;
+        }
+        return parsed;
+    }
+
+    def norm_name(raw: any) -> str {
+        return String(raw or "").trim().toLowerCase().split(" ").filter(
+            lambda part: str -> bool { return part.trim().length > 0; }
+        ).join(" ");
+    }
+
+    def norm_unit(raw: any) -> str {
+        return String(raw or "PIECE").trim().toUpperCase();
+    }
+
+    def round_two(value: float) -> float {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    def legacy_rating_to_scale(raw_rating: float) -> float {
+        if raw_rating >= 4.5 {
+            return 10.0;
+        }
+        if raw_rating >= 3.5 {
+            return 8.5;
+        }
+        if raw_rating >= 2.5 {
+            return 5.5;
+        }
+        if raw_rating >= 1.5 {
+            return 2.5;
+        }
+        if raw_rating > 0 {
+            return 1.0;
+        }
+        return 0.0;
+    }
+
+    def tier_min_rating(tier: str) -> float {
+        if tier == "very_good" {
+            return 7.0;
+        }
+        if tier == "average" {
+            return 4.0;
+        }
+        if tier == "not_great" {
+            return 1.0;
+        }
+        return 0.0;
+    }
+
+    def tier_max_rating(tier: str) -> float {
+        if tier == "very_good" {
+            return 10.0;
+        }
+        if tier == "average" {
+            return 6.9;
+        }
+        if tier == "not_great" {
+            return 3.9;
+        }
+        return 0.0;
+    }
+
+    def tier_label(tier: str) -> str {
+        if tier == "very_good" {
+            return "Very Good";
+        }
+        if tier == "average" {
+            return "Average";
+        }
+        if tier == "not_great" {
+            return "Not Great";
+        }
+        return "Unranked";
+    }
+
+    def tier_priority(tier: str) -> int {
+        if tier == "very_good" {
+            return 0;
+        }
+        if tier == "average" {
+            return 1;
+        }
+        if tier == "not_great" {
+            return 2;
+        }
+        return 3;
+    }
+
+    def clamp_rating(value: float, min_val: float, max_val: float) -> float {
+        if value < min_val {
+            return min_val;
+        }
+        if value > max_val {
+            return max_val;
+        }
+        return value;
+    }
+
+    def round_rating(value: float) -> float {
+        return Math.round(value * 10.0) / 10.0;
+    }
+
+    def recipe_rating_value(recipe: dict) -> float {
+        raw_rating = to_num(String(recipe.rating or "0"), 0.0);
+        raw_tier = String(recipe.rating_tier or "").trim().toLowerCase();
+        if raw_tier == "" and raw_rating > 0 and raw_rating <= 5.0 {
+            return legacy_rating_to_scale(raw_rating);
+        }
+        return raw_rating;
+    }
+
+    def recipe_tier(recipe: dict) -> str {
+        raw_tier = String(recipe.rating_tier or "").trim().toLowerCase();
+        if raw_tier == "very_good" or raw_tier == "average" or raw_tier == "not_great" {
+            return raw_tier;
+        }
+        score = recipe_rating_value(recipe);
+        if score >= 7.0 {
+            return "very_good";
+        }
+        if score >= 4.0 {
+            return "average";
+        }
+        if score > 0.0 {
+            return "not_great";
+        }
+        return "";
+    }
+
+    def rating_order_value(recipe: dict) -> int {
+        return to_int(recipe.rating_order, -1);
+    }
+
+    def generated_time_value(recipe: dict) -> int {
+        return to_int(recipe.generated_at_ms, 0);
+    }
+
+    def made_time_value(recipe: dict) -> int {
+        return to_int(recipe.made_at_ms, 0);
+    }
+
+    def clone_recipe(recipe: dict) -> dict {
+        return {
+            "recipe_id": String(recipe.recipe_id or ""),
+            "title": String(recipe.title or recipe.recipe_name or ""),
+            "total_calories": to_num(String(recipe.total_calories or "0"), 0.0),
+            "total_protein_g": to_num(String(recipe.total_protein_g or "0"), 0.0),
+            "total_carbs_g": to_num(String(recipe.total_carbs_g or "0"), 0.0),
+            "total_fat_g": to_num(String(recipe.total_fat_g or "0"), 0.0),
+            "generated_at_ms": generated_time_value(recipe),
+            "rating": recipe_rating_value(recipe),
+            "rating_tier": recipe_tier(recipe),
+            "rating_order": rating_order_value(recipe),
+            "favorite": (true if recipe.favorite else false),
+            "made": (true if recipe.made else false),
+            "made_at_ms": made_time_value(recipe),
+            "notes": String(recipe.notes or "Generated from your profile + pantry")
+        };
+    }
+
+    def sort_ranked_recipes(list_in: list) -> list {
+        return list_in.slice().sort(
+            lambda left: dict, right: dict -> int {
+                left_order = rating_order_value(left);
+                right_order = rating_order_value(right);
+                if left_order >= 0 and right_order >= 0 and left_order != right_order {
+                    return left_order - right_order;
+                }
+                left_rating = recipe_rating_value(left);
+                right_rating = recipe_rating_value(right);
+                if left_rating != right_rating {
+                    return Math.round((right_rating - left_rating) * 100.0);
+                }
+                return generated_time_value(right) - generated_time_value(left);
+            }
+        );
+    }
+
+    def tier_recipes_sorted(tier: str, exclude_recipe_id: str = "") -> list {
+        return sort_ranked_recipes(
+            recipes.filter(
+                lambda recipe: dict -> bool {
+                    return (
+                        recipe_tier(recipe) == tier and
+                        String(recipe.recipe_id or "") != exclude_recipe_id
+                    );
+                }
+            )
+        );
+    }
+
+    def score_for_tier_position(tier: str, position: int, total: int) -> float {
+        min_score = tier_min_rating(tier);
+        max_score = tier_max_rating(tier);
+        if total <= 0 {
+            return 0.0;
+        }
+        if total == 1 {
+            return round_rating((min_score + max_score) / 2.0);
+        }
+        step = (max_score - min_score) / (total - 1);
+        return round_rating(clamp_rating(max_score - (position * step), min_score, max_score));
+    }
+
+    def build_rank_updates_for_tier(tier: str, ranked_recipes: list) -> list {
+        updates: list = [];
+        total = ranked_recipes.length;
+        for idx=0 to idx<total by idx+=1 {
+            ranked_recipe = ranked_recipes[idx];
+            updates = updates.concat([{
+                "recipe_id": String(ranked_recipe.recipe_id or ""),
+                "rating": score_for_tier_position(tier, idx, total),
+                "rating_tier": tier,
+                "rating_order": idx
+            }]);
+        }
+        return updates;
+    }
+
+    def apply_rank_updates(base_recipes: list, updates: list) -> list {
+        update_map: dict = {};
+        for row in updates {
+            update_map[String(row.recipe_id or "")] = row;
+        }
+        next_recipes: list = [];
+        for recipe in base_recipes {
+            recipe_id = String(recipe.recipe_id or "");
+            row = update_map.get(recipe_id, None);
+            next_recipe = clone_recipe(recipe);
+            if row != None {
+                next_recipe.rating = to_num(String(row.rating or "0"), 0.0);
+                next_recipe.rating_tier = String(row.rating_tier or "").trim().toLowerCase();
+                next_recipe.rating_order = to_int(row.rating_order, -1);
+            }
+            next_recipes = next_recipes.concat([next_recipe]);
+        }
+        return next_recipes;
+    }
+
+    def clear_ranking_session() -> None {
+        active_rank_recipe_id = "";
+        active_rank_tier = "";
+        active_rank_candidates = [];
+        active_rank_low = 0;
+        active_rank_high = -1;
+        active_rank_mid = -1;
+    }
+
+    def current_rank_comparison() -> dict {
+        if active_rank_mid < 0 or active_rank_mid >= active_rank_candidates.length {
+            return {};
+        }
+        return active_rank_candidates[active_rank_mid];
+    }
+
+    def rating_display_text(recipe: dict) -> str {
+        score = recipe_rating_value(recipe);
+        if score <= 0.0 {
+            return "Not Ranked";
+        }
+        return String(score.toFixed(1));
+    }
+
+    def rating_intensity(recipe: dict) -> float {
+        tier = recipe_tier(recipe);
+        if tier == "" {
+            return 0.0;
+        }
+        min_score = tier_min_rating(tier);
+        max_score = tier_max_rating(tier);
+        if max_score <= min_score {
+            return 0.0;
+        }
+        return clamp_rating((recipe_rating_value(recipe) - min_score) / (max_score - min_score), 0.0, 1.0);
+    }
+
+    def rating_badge_style(recipe: dict) -> dict {
+        tier = recipe_tier(recipe);
+        intensity = rating_intensity(recipe);
+        alpha = (0.20 + (intensity * 0.55)).toFixed(2);
+        border_alpha = (0.35 + (intensity * 0.45)).toFixed(2);
+        if tier == "very_good" {
+            return {
+                "display": "inline-flex",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "minWidth": "74px",
+                "padding": "6px 10px",
+                "borderRadius": "999px",
+                "fontWeight": "800",
+                "background": "rgba(34, 197, 94, " + alpha + ")",
+                "border": "1px solid rgba(21, 128, 61, " + border_alpha + ")",
+                "color": "#14532d"
+            };
+        }
+        if tier == "average" {
+            return {
+                "display": "inline-flex",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "minWidth": "74px",
+                "padding": "6px 10px",
+                "borderRadius": "999px",
+                "fontWeight": "800",
+                "background": "rgba(250, 204, 21, " + alpha + ")",
+                "border": "1px solid rgba(161, 98, 7, " + border_alpha + ")",
+                "color": "#713f12"
+            };
+        }
+        if tier == "not_great" {
+            return {
+                "display": "inline-flex",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "minWidth": "74px",
+                "padding": "6px 10px",
+                "borderRadius": "999px",
+                "fontWeight": "800",
+                "background": "rgba(239, 68, 68, " + alpha + ")",
+                "border": "1px solid rgba(185, 28, 28, " + border_alpha + ")",
+                "color": "#7f1d1d"
+            };
+        }
+        return {
+            "display": "inline-flex",
+            "alignItems": "center",
+            "justifyContent": "center",
+            "minWidth": "92px",
+            "padding": "6px 10px",
+            "borderRadius": "999px",
+            "fontWeight": "700",
+            "background": "#f8fafc",
+            "border": "1px solid #cbd5e1",
+            "color": "#475569"
+        };
+    }
+
+    def tier_chip_style(tier: str) -> dict {
+        if tier == "very_good" {
+            return {"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #86efac", "background": "#dcfce7", "color": "#166534", "fontWeight": "700", "fontSize": "0.84rem"};
+        }
+        if tier == "average" {
+            return {"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #fcd34d", "background": "#fef3c7", "color": "#92400e", "fontWeight": "700", "fontSize": "0.84rem"};
+        }
+        if tier == "not_great" {
+            return {"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #fca5a5", "background": "#fee2e2", "color": "#991b1b", "fontWeight": "700", "fontSize": "0.84rem"};
+        }
+        return {"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "color": "#475569", "fontWeight": "700", "fontSize": "0.84rem"};
+    }
+
+    def tier_button_style(tier: str, is_active: bool = false) -> dict {
+        if tier == "very_good" {
+            return {
+                "padding": "8px 10px",
+                "borderRadius": "10px",
+                "border": ("2px solid #15803d" if is_active else "1px solid #86efac"),
+                "background": ("#22c55e" if is_active else "#dcfce7"),
+                "color": ("#f0fdf4" if is_active else "#166534"),
+                "fontWeight": "800"
+            };
+        }
+        if tier == "average" {
+            return {
+                "padding": "8px 10px",
+                "borderRadius": "10px",
+                "border": ("2px solid #a16207" if is_active else "1px solid #fcd34d"),
+                "background": ("#f59e0b" if is_active else "#fef3c7"),
+                "color": ("#fffbeb" if is_active else "#92400e"),
+                "fontWeight": "800"
+            };
+        }
+        return {
+            "padding": "8px 10px",
+            "borderRadius": "10px",
+            "border": ("2px solid #b91c1c" if is_active else "1px solid #fca5a5"),
+            "background": ("#ef4444" if is_active else "#fee2e2"),
+            "color": ("#fef2f2" if is_active else "#991b1b"),
+            "fontWeight": "800"
+        };
+    }
+
     def visible_recipes() -> list {
         if not is_listish(recipes) {
             return [];
         }
+        ordered = recipes.slice().sort(
+            lambda left: dict, right: dict -> int {
+                left_tier = recipe_tier(left);
+                right_tier = recipe_tier(right);
+                tier_diff = tier_priority(left_tier) - tier_priority(right_tier);
+                if tier_diff != 0 {
+                    return tier_diff;
+                }
+                if left_tier != "" or right_tier != "" {
+                    left_order = rating_order_value(left);
+                    right_order = rating_order_value(right);
+                    if left_order >= 0 and right_order >= 0 and left_order != right_order {
+                        return left_order - right_order;
+                    }
+                    rating_diff = Math.round((recipe_rating_value(right) - recipe_rating_value(left)) * 100.0);
+                    if rating_diff != 0 {
+                        return rating_diff;
+                    }
+                }
+                return generated_time_value(right) - generated_time_value(left);
+            }
+        );
         if filter_mode == "favorites" {
-            return recipes.filter(
+            return ordered.filter(
                 lambda recipe: dict -> bool { return recipe.favorite; }
             );
         }
         if filter_mode == "history" {
-            return recipes;
+            return ordered.filter(
+                lambda recipe: dict -> bool { return recipe.made; }
+            );
         }
-        return recipes;
+        return ordered;
     }
 
-    def toggle_favorite(recipe_id: int) -> None {
-        next_recipes: list = [];
+    def format_saved_time(recipe: dict) -> str {
+        raw_ms = parseInt(String(recipe.generated_at_ms or 0));
+        if isNaN(raw_ms) or raw_ms <= 0 {
+            return "Unknown";
+        }
+        stamp = Reflect.construct(Date, [raw_ms]);
+        return stamp.toLocaleString();
+    }
+
+    def format_made_time(recipe: dict) -> str {
+        raw_ms = to_int(recipe.made_at_ms, 0);
+        if raw_ms <= 0 {
+            return "Not made yet";
+        }
+        stamp = Reflect.construct(Date, [raw_ms]);
+        return stamp.toLocaleString();
+    }
+
+    def recipe_by_id(recipe_id: str) -> dict {
         for recipe in recipes {
-            if recipe.id == recipe_id {
-                next_recipes = next_recipes.concat([{
-                    "id": recipe.id,
-                    "title": recipe.title,
-                    "last_cooked": recipe.last_cooked,
-                    "rating": recipe.rating,
-                    "favorite": not recipe.favorite,
-                    "notes": recipe.notes
-                }]);
+            if String(recipe.recipe_id or "") == recipe_id {
+                return recipe;
+            }
+        }
+        return {};
+    }
+
+    def generated_recipe_history_entry() -> dict {
+        recipe_id = String(generated_recipe.recipe_id or "");
+        if recipe_id == "" {
+            return {};
+        }
+        return recipe_by_id(recipe_id);
+    }
+
+    def history_entry_from_generated_recipe(recipe_id: str, made_at_ms: int = 0, made: bool = false) -> dict {
+        return {
+            "recipe_id": recipe_id,
+            "title": String(generated_recipe.recipe_name or generated_recipe.title or "Generated Recipe"),
+            "total_calories": to_num(String(generated_recipe.total_calories or "0"), 0.0),
+            "total_protein_g": to_num(String(generated_recipe.total_protein_g or "0"), 0.0),
+            "total_carbs_g": to_num(String(generated_recipe.total_carbs_g or "0"), 0.0),
+            "total_fat_g": to_num(String(generated_recipe.total_fat_g or "0"), 0.0),
+            "generated_at_ms": to_int(generated_recipe.generated_at_ms, now_ms()),
+            "rating": 0.0,
+            "rating_tier": "",
+            "rating_order": -1,
+            "favorite": false,
+            "made": made,
+            "made_at_ms": (made_at_ms if made else 0),
+            "notes": "Generated from your profile + pantry"
+        };
+    }
+
+    def replace_recipe_in_list(updated_recipe: dict) -> None {
+        next_recipes: list = [];
+        replaced = false;
+        target_id = String(updated_recipe.recipe_id or "");
+        for recipe in recipes {
+            if String(recipe.recipe_id or "") == target_id {
+                next_recipes = next_recipes.concat([updated_recipe]);
+                replaced = true;
             } else {
                 next_recipes = next_recipes.concat([recipe]);
             }
         }
+        if not replaced and Object.keys(updated_recipe).length > 0 {
+            next_recipes = next_recipes.concat([updated_recipe]);
+        }
         recipes = next_recipes;
     }
 
-    def set_rating(recipe_id: int, rating_val: int) -> None {
-        next_recipes: list = [];
-        for recipe in recipes {
-            if recipe.id == recipe_id {
-                next_recipes = next_recipes.concat([{
-                    "id": recipe.id,
-                    "title": recipe.title,
-                    "last_cooked": recipe.last_cooked,
-                    "rating": rating_val,
-                    "favorite": recipe.favorite,
-                    "notes": recipe.notes
-                }]);
-            } else {
-                next_recipes = next_recipes.concat([recipe]);
-            }
-        }
-        recipes = next_recipes;
+    def remove_recipe_from_list(recipe_id: str) -> None {
+        recipes = recipes.filter(
+            lambda recipe: dict -> bool { return String(recipe.recipe_id or "") != recipe_id; }
+        );
     }
 
     def generate_new_recipe() -> None {
@@ -247,6 +725,69 @@ def:pub RecipesTab(
         );
     }
 
+    async def handle_remove_pantry_item_click(e: any) -> None {
+        item_name = event_attr(e, "data-item-name").trim();
+        if item_name == "" {
+            return;
+        }
+        await remove_pantry_item(item_name);
+    }
+
+    def next_pantry_after_recipe(recipe_ingredients: list) -> list {
+        next_pantry = pantry_items_ref().map(
+            lambda item: dict -> dict { return
+                {
+                    "name": String(item.name or ""),
+                    "quantity": to_num(String(item.quantity or "0"), 0.0),
+                    "unit": norm_unit(item.unit),
+                    "cost": to_num(String(item.cost or "0"), 0.0),
+                    "protein": to_num(String(item.protein or "0"), 0.0),
+                    "carb": to_num(String(item.carb or "0"), 0.0),
+                    "fat": to_num(String(item.fat or "0"), 0.0)
+                }; }
+        );
+
+        for ingredient in recipe_ingredients {
+            remaining_qty = to_num(String(ingredient.quantity or "0"), 0.0);
+            if remaining_qty <= 0.0 {
+                continue;
+            }
+            ingredient_name = norm_name(ingredient.name);
+            ingredient_unit = norm_unit(ingredient.unit);
+            updated_pantry: list = [];
+
+            for item in next_pantry {
+                item_qty = to_num(String(item.quantity or "0"), 0.0);
+                if remaining_qty > 0.0 and norm_name(item.name) == ingredient_name and norm_unit(item.unit) == ingredient_unit {
+                    used_qty = remaining_qty;
+                    if used_qty > item_qty {
+                        used_qty = item_qty;
+                    }
+                    remaining_qty = remaining_qty - used_qty;
+                    remaining_item_qty = item_qty - used_qty;
+                    if remaining_item_qty > 0.0001 and item_qty > 0.0 {
+                        keep_ratio = remaining_item_qty / item_qty;
+                        updated_pantry = updated_pantry.concat([{
+                            "name": item.name,
+                            "quantity": round_two(remaining_item_qty),
+                            "unit": norm_unit(item.unit),
+                            "cost": round_two(to_num(String(item.cost or "0"), 0.0) * keep_ratio),
+                            "protein": round_two(to_num(String(item.protein or "0"), 0.0) * keep_ratio),
+                            "carb": round_two(to_num(String(item.carb or "0"), 0.0) * keep_ratio),
+                            "fat": round_two(to_num(String(item.fat or "0"), 0.0) * keep_ratio)
+                        }]);
+                    }
+                } else {
+                    updated_pantry = updated_pantry.concat([item]);
+                }
+            }
+
+            next_pantry = updated_pantry;
+        }
+
+        return next_pantry;
+    }
+
     def macro_ratio(consumed: float, target: float) -> int {
         if target <= 0 {
             return 0;
@@ -259,6 +800,99 @@ def:pub RecipesTab(
             return 100;
         }
         return val;
+    }
+
+    async def mark_generated_recipe_made() -> None {
+        recipe_id = String(generated_recipe.recipe_id or "");
+        if recipe_id == "" {
+            status_text = "Generate or load a recipe first.";
+            return;
+        }
+        if not generated_recipe.ingredients or not is_listish(generated_recipe.ingredients) or generated_recipe.ingredients.length == 0 {
+            status_text = "This recipe does not have ingredient data to remove from pantry.";
+            return;
+        }
+
+        recipe = generated_recipe_history_entry();
+        if recipe.made {
+            show_made_confirm = false;
+            pending_rate_recipe_id = recipe_id;
+            filter_mode = "history";
+            status_text = "Recipe is already in Past Recipes. Rate or rerank it below.";
+            return;
+        }
+
+        show_made_confirm = false;
+        loading = true;
+        status_text = "Removing used ingredients and saving to Past Recipes...";
+        previous_pantry = pantry_items_ref().slice();
+        next_pantry = next_pantry_after_recipe(generated_recipe.ingredients);
+        pantry_match_note = "";
+        made_at_ms = now_ms();
+
+        try {
+            try {
+                subtract_result = root spawn ComputePantryAfterRecipe(
+                    pantry_items=pantry_items_ref(),
+                    recipe_ingredients=generated_recipe.ingredients
+                );
+                subtract_out = first_report_payload(subtract_result);
+                if subtract_out and subtract_out.ok and is_listish(subtract_out.updated_pantry) {
+                    next_pantry = subtract_out.updated_pantry;
+                    pantry_match_note = String(subtract_out.notes or "");
+                } elif subtract_out and subtract_out.error {
+                    pantry_match_note = "Used direct pantry subtraction fallback: " + String(subtract_out.error);
+                }
+            } except Exception as subtract_e {
+                pantry_match_note = "Used direct pantry subtraction fallback: " + subtract_e.toString();
+            }
+            await set_pantry_items(next_pantry);
+            result = root spawn MarkRecipeMade(
+                recipe_id=recipe_id,
+                made=True,
+                made_at_ms=made_at_ms
+            );
+            out = first_report_payload(result);
+            if not out or out.updated == false {
+                await set_pantry_items(previous_pantry);
+                err_text = String((out.error if out else "Recipe update failed."));
+                status_text = "Could not mark recipe as made: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
+
+            await load_recipe_history_api(True);
+            updated_recipe = recipe_by_id(recipe_id);
+            if updated_recipe and Object.keys(updated_recipe).length > 0 {
+                updated_recipe = clone_recipe(updated_recipe);
+                updated_recipe.made = true;
+                updated_recipe.made_at_ms = made_at_ms;
+                replace_recipe_in_list(updated_recipe);
+            } else {
+                replace_recipe_in_list(
+                    history_entry_from_generated_recipe(recipe_id, made_at_ms, true)
+                );
+            }
+            try {
+                root spawn ClearGeneratedRecipe();
+            } except Exception as _e {
+                0;
+            }
+            generated_recipe = {};
+            pending_rate_recipe_id = recipe_id;
+            filter_mode = "history";
+            status_text = "Recipe added to Past Recipes, pantry updated, and rating prompt is ready below.";
+            if pantry_match_note.trim().length > 0 {
+                status_text = [status_text, " ", pantry_match_note].join("");
+            }
+        } except Exception as e {
+            await set_pantry_items(previous_pantry);
+            err_text = e.toString();
+            status_text = "Could not mark recipe as made: " + err_text;
+            maybe_trigger_auth_error(err_text);
+        }
+        loading = false;
     }
 
     async def generate_recipe_api() -> None {
@@ -307,16 +941,8 @@ def:pub RecipesTab(
             }
 
             generated_recipe = recipe_out;
-
-            next_id = recipes.length + 1;
-            recipes = [{
-                "id": next_id,
-                "title": String(recipe_out.recipe_name or "Generated Recipe"),
-                "last_cooked": "Just now",
-                "rating": 0,
-                "favorite": false,
-                "notes": "Generated from your profile + pantry"
-            }].concat(recipes);
+            show_made_confirm = false;
+            await load_recipe_history_api(True);
 
             status_text = "Recipe generated with API.";
         } except Exception as e {
@@ -327,16 +953,274 @@ def:pub RecipesTab(
         loading = false;
     }
 
+    async def load_saved_macro_needs() -> None {
+        try {
+            macro_result = root spawn GenerateUserMacroNeeds();
+            macro_out = first_report_payload(macro_result);
+            if macro_out and macro_out.ok {
+                macro_needs = macro_out;
+            } elif macro_out and macro_out.error {
+                maybe_trigger_auth_error(String(macro_out.error));
+            }
+        } except Exception as e {
+            maybe_trigger_auth_error(e.toString());
+        }
+    }
+
+    async def load_recipe_history_api(silent: bool = False) -> None {
+        if not silent {
+            loading = true;
+            status_text = "Loading saved recipe history...";
+        }
+        try {
+            result = root spawn ListRecipeHistory();
+            out = first_report_payload(result);
+            if is_listish(out) {
+                recipes = out.map(
+                    lambda recipe: dict -> dict { return clone_recipe(recipe); }
+                );
+            } else {
+                recipes = [];
+            }
+            clear_ranking_session();
+            if not silent {
+                status_text = ["Loaded ", String(recipes.length), " saved recipes."].join("");
+            }
+        } except Exception as e {
+            err_text = e.toString();
+            if not silent {
+                status_text = "History load failed: " + err_text;
+            }
+            maybe_trigger_auth_error(err_text);
+        }
+        if not silent {
+            loading = false;
+        }
+    }
+
+    async def toggle_favorite(recipe_id: str) -> None {
+        recipe = recipe_by_id(recipe_id);
+        if not recipe or Object.keys(recipe).length == 0 {
+            status_text = "Recipe not found.";
+            return;
+        }
+
+        loading = true;
+        status_text = "Saving favorite status...";
+        try {
+            next_recipe = clone_recipe(recipe);
+            next_recipe.favorite = (false if recipe.favorite else true);
+            replace_recipe_in_list(next_recipe);
+            result = root spawn SetRecipeFavorite(
+                recipe_id=recipe_id,
+                favorite=next_recipe.favorite
+            );
+            out = first_report_payload(result);
+            if out and out.updated == false {
+                err_text = String(out.error or "Recipe update failed.");
+                replace_recipe_in_list(recipe);
+                status_text = "Favorite update failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
+            status_text = "Favorite status saved.";
+        } except Exception as e {
+            replace_recipe_in_list(recipe);
+            err_text = e.toString();
+            status_text = "Favorite update failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
+        }
+        loading = false;
+    }
+
+    async def handle_saved_recipe_favorite_click(e: any) -> None {
+        recipe_id = event_attr(e, "data-recipe-id").trim();
+        if recipe_id == "" {
+            return;
+        }
+        await toggle_favorite(recipe_id);
+    }
+
+    async def finalize_recipe_ranking(recipe_id: str, tier: str, insert_index: int) -> None {
+        recipe = recipe_by_id(recipe_id);
+        if not recipe or Object.keys(recipe).length == 0 {
+            clear_ranking_session();
+            status_text = "Recipe not found.";
+            return;
+        }
+
+        source_tier = recipe_tier(recipe);
+        destination_ranked = tier_recipes_sorted(tier, recipe_id);
+        if insert_index < 0 {
+            insert_index = 0;
+        }
+        if insert_index > destination_ranked.length {
+            insert_index = destination_ranked.length;
+        }
+
+        destination_with_target = destination_ranked.slice(0, insert_index).concat([clone_recipe(recipe)]).concat(destination_ranked.slice(insert_index));
+        rank_updates = build_rank_updates_for_tier(tier, destination_with_target);
+        if source_tier != "" and source_tier != tier {
+            source_without_target = tier_recipes_sorted(source_tier, recipe_id);
+            rank_updates = rank_updates.concat(
+                build_rank_updates_for_tier(source_tier, source_without_target)
+            );
+        }
+
+        previous_recipes = recipes.slice();
+        recipes = apply_rank_updates(previous_recipes, rank_updates);
+        clear_ranking_session();
+        loading = true;
+        status_text = "Saving ranking placement...";
+        try {
+            result = root spawn SaveRecipeRankingBatch(updates=rank_updates);
+            out = first_report_payload(result);
+            if not out or out.updated == false {
+                recipes = previous_recipes;
+                err_text = String((out.error if out else "Recipe ranking failed."));
+                status_text = "Ranking save failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
+            if pending_rate_recipe_id == recipe_id {
+                pending_rate_recipe_id = "";
+            }
+            status_text = ["Ranked recipe in ", tier_label(tier), "."].join("");
+        } except Exception as e {
+            recipes = previous_recipes;
+            err_text = e.toString();
+            status_text = "Ranking save failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
+        }
+        loading = false;
+    }
+
+    async def start_recipe_ranking(recipe_id: str, tier: str) -> None {
+        recipe = recipe_by_id(recipe_id);
+        if not recipe or Object.keys(recipe).length == 0 {
+            status_text = "Recipe not found.";
+            return;
+        }
+
+        candidates = tier_recipes_sorted(tier, recipe_id);
+        clear_ranking_session();
+        if candidates.length == 0 {
+            await finalize_recipe_ranking(recipe_id, tier, 0);
+            return;
+        }
+
+        active_rank_recipe_id = recipe_id;
+        active_rank_tier = tier;
+        active_rank_candidates = candidates;
+        active_rank_low = 0;
+        active_rank_high = candidates.length - 1;
+        active_rank_mid = Math.floor((active_rank_low + active_rank_high) / 2);
+        compare_recipe = current_rank_comparison();
+        status_text = ["Compare against ", String(compare_recipe.title or "the middle recipe"), " to place this recipe in ", tier_label(tier), "."].join("");
+    }
+
+    async def handle_rank_tier_click(e: any) -> None {
+        recipe_id = event_attr(e, "data-recipe-id").trim();
+        tier = event_attr(e, "data-tier").trim().toLowerCase();
+        if recipe_id == "" or tier == "" {
+            return;
+        }
+        await start_recipe_ranking(recipe_id, tier);
+    }
+
+    async def submit_rank_choice(current_recipe_wins: bool) -> None {
+        if active_rank_recipe_id == "" or active_rank_tier == "" {
+            status_text = "Choose a tier before comparing recipes.";
+            return;
+        }
+
+        next_low = active_rank_low;
+        next_high = active_rank_high;
+        if current_recipe_wins {
+            next_high = active_rank_mid - 1;
+        } else {
+            next_low = active_rank_mid + 1;
+        }
+
+        if next_low > next_high {
+            await finalize_recipe_ranking(active_rank_recipe_id, active_rank_tier, next_low);
+            return;
+        }
+
+        active_rank_low = next_low;
+        active_rank_high = next_high;
+        active_rank_mid = Math.floor((next_low + next_high) / 2);
+        compare_recipe = current_rank_comparison();
+        status_text = ["Next comparison: ", String(compare_recipe.title or "recipe"), "."].join("");
+    }
+
+    async def handle_rank_compare_click(e: any) -> None {
+        outcome = event_attr(e, "data-current-wins").trim().toLowerCase();
+        await submit_rank_choice(outcome == "true");
+    }
+
+    async def delete_saved_recipe(recipe_id: str) -> None {
+        recipe = recipe_by_id(recipe_id);
+        if not recipe or Object.keys(recipe).length == 0 {
+            status_text = "Recipe not found.";
+            return;
+        }
+
+        loading = true;
+        status_text = "Deleting saved recipe...";
+        clear_ranking_session();
+        if pending_rate_recipe_id == recipe_id {
+            pending_rate_recipe_id = "";
+        }
+        remove_recipe_from_list(recipe_id);
+        try {
+            result = root spawn DeleteSavedRecipe(recipe_id=recipe_id);
+            out = first_report_payload(result);
+            if out and out.deleted == false {
+                err_text = String(out.error or "Recipe delete failed.");
+                replace_recipe_in_list(recipe);
+                status_text = "Delete failed: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return;
+            }
+            if String(generated_recipe.recipe_id or "") == recipe_id {
+                generated_recipe = {};
+            }
+            status_text = "Saved recipe deleted.";
+        } except Exception as e {
+            replace_recipe_in_list(recipe);
+            err_text = e.toString();
+            status_text = "Delete failed: " + err_text;
+            maybe_trigger_auth_error(err_text);
+        }
+        loading = false;
+    }
+
+    async def handle_saved_recipe_delete_click(e: any) -> None {
+        recipe_id = event_attr(e, "data-recipe-id").trim();
+        if recipe_id == "" {
+            return;
+        }
+        await delete_saved_recipe(recipe_id);
+    }
+
     async def load_saved_recipe_api() -> None {
         loading = true;
         status_text = "Loading saved recipe...";
         try {
             result = root spawn ListGeneratedRecipe();
             out = first_report_payload(result);
-            if out and Object.keys(out).length > 0 {
+            if out and out.recipe_name and String(out.recipe_name).trim().length > 0 {
                 generated_recipe = out;
+                show_made_confirm = false;
+                await load_saved_macro_needs();
                 status_text = "Loaded saved recipe from backend.";
             } else {
+                generated_recipe = {};
+                show_made_confirm = false;
                 status_text = "No saved recipe found.";
             }
         } except Exception as e {
@@ -353,6 +1237,7 @@ def:pub RecipesTab(
         try {
             root spawn ClearGeneratedRecipe();
             generated_recipe = {};
+            show_made_confirm = false;
             status_text = "Saved recipe cleared.";
         } except Exception as e {
             err_text = e.toString();
@@ -360,6 +1245,11 @@ def:pub RecipesTab(
             maybe_trigger_auth_error(err_text);
         }
         loading = false;
+    }
+
+    async can with entry {
+        await load_saved_recipe_api();
+        await load_recipe_history_api(True);
     }
 
     return
@@ -487,7 +1377,8 @@ def:pub RecipesTab(
                                                 <td style={{"padding": "8px"}}>{item.fat}</td>
                                                 <td style={{"padding": "8px"}}>
                                                     <button
-                                                        onClick={lambda -> None { remove_pantry_item(item.name); }}
+                                                        data-item-name={String(item.name or "")}
+                                                        onClick={handle_remove_pantry_item_click}
                                                         style={{"padding": "6px 8px", "borderRadius": "8px", "border": "1px solid #991b1b", "background": "#fee2e2"}}
                                                     >
                                                         Remove
@@ -526,12 +1417,54 @@ def:pub RecipesTab(
                             )}
                         </ol>
                     ) if (generated_recipe and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
+                    {(
+                        <div style={{"display": "grid", "gap": "8px", "marginTop": "10px", "padding": "10px", "borderRadius": "12px", "border": "1px solid #dbeafe", "background": "#eff6ff"}}>
+                            <div style={{"fontWeight": "800"}}>Made This Recipe?</div>
+                            <div style={{"fontSize": "0.92rem", "lineHeight": "1.45"}}>
+                                If yes, CaloReceipt will remove the used ingredients from your pantry, move the recipe into Past Recipes, and then ask you to rate it.
+                            </div>
+                            {(
+                                <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"}}>
+                                    <span style={{"padding": "5px 10px", "borderRadius": "999px", "border": "1px solid #86efac", "background": "#dcfce7", "color": "#166534", "fontWeight": "800"}}>
+                                        Added To Past Recipes
+                                    </span>
+                                    <span style={{"fontSize": "0.88rem", "opacity": "0.76"}}>
+                                        Made: {format_made_time(generated_recipe_history_entry())}
+                                    </span>
+                                </div>
+                            ) if generated_recipe_history_entry().made else (
+                                <button onClick={lambda -> None { show_made_confirm = true; }} style={{"padding": "9px 12px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "800", "width": "fit-content"}}>
+                                    Yes, I Made This Recipe
+                                </button>
+                            )}
+                            {(
+                                <div style={{"display": "grid", "gap": "8px", "padding": "10px", "borderRadius": "10px", "border": "1px solid #bfdbfe", "background": "#ffffff"}}>
+                                    <div style={{"fontWeight": "800"}}>Confirm Recipe Completion</div>
+                                    <div style={{"fontSize": "0.9rem", "lineHeight": "1.45"}}>
+                                        Use this only after you actually made the recipe. We will subtract the listed ingredients from your pantry and send the recipe to Past Recipes.
+                                    </div>
+                                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
+                                        <button onClick={mark_generated_recipe_made} disabled={loading} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "800", "opacity": ("0.7" if loading else "1")}}>
+                                            Yes, Update Pantry And Continue
+                                        </button>
+                                        <button onClick={lambda -> None { show_made_confirm = false; }} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff", "fontWeight": "700"}}>
+                                            Not Yet
+                                        </button>
+                                    </div>
+                                </div>
+                            ) if show_made_confirm else None}
+                        </div>
+                    ) if Object.keys(generated_recipe).length > 0 else <div />}
                 </div>
 
             <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
                 <button onClick={lambda -> None { filter_mode = "all"; }} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": ("#dbeafe" if filter_mode == "all" else "#ffffff")}}>All</button>
                 <button onClick={lambda -> None { filter_mode = "favorites"; }} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": ("#dbeafe" if filter_mode == "favorites" else "#ffffff")}}>Favorites</button>
                 <button onClick={lambda -> None { filter_mode = "history"; }} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": ("#dbeafe" if filter_mode == "history" else "#ffffff")}}>Past Recipes</button>
+            </div>
+
+            <div style={{"padding": "10px 12px", "border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "12px", "fontSize": "0.94rem", "lineHeight": "1.5"}}>
+                Rank each recipe by picking a tier first, then compare it against the middle recipe in that tier until the binary-search flow finds its slot. Scores are recalculated on a `1.0-10.0` scale inside each tier.
             </div>
 
             {(
@@ -544,31 +1477,114 @@ def:pub RecipesTab(
             ) if Object.keys(new_recipe_idea).length > 0 else <div />}
 
             <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(250px, 1fr))", "gap": "10px"}}>
-                {visible_recipes().map(
-                    lambda recipe: dict -> JsxElement { return
-                        <div key={recipe.id.toString()} style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff", "display": "grid", "gap": "8px"}}>
-                            <div style={{"display": "flex", "justifyContent": "space-between", "gap": "8px"}}>
-                                <h3 style={{"margin": "0", "fontSize": "1.05rem"}}>{recipe.title}</h3>
-                                <button onClick={lambda -> None { toggle_favorite(recipe.id); }} style={{"border": "1px solid #fbcfe8", "background": "#fdf2f8", "borderRadius": "8px", "padding": "4px 8px"}}>
-                                    {("★ Favorite" if recipe.favorite else "☆ Favorite")}
-                                </button>
-                            </div>
-                            <div style={{"fontSize": "0.9rem", "opacity": "0.75"}}>Last cooked: {recipe.last_cooked}</div>
-                            <div style={{"display": "flex", "gap": "6px", "alignItems": "center"}}>
-                                <span style={{"fontSize": "0.9rem"}}>Rate:</span>
-                                {[1, 2, 3, 4, 5].map(
-                                    lambda rating_val: int -> JsxElement { return
+                {(
+                    <div style={{"opacity": "0.75"}}>No saved recipes yet.</div>
+                ) if visible_recipes().length == 0 else (
+                    visible_recipes().map(
+                        lambda recipe: dict -> JsxElement { return
+                            <div key={String(recipe.recipe_id or recipe.title)} style={{"border": ("2px solid #93c5fd" if pending_rate_recipe_id == String(recipe.recipe_id or "") else "1px solid #e2e8f0"), "borderRadius": "12px", "padding": "12px", "background": ("#f8fbff" if pending_rate_recipe_id == String(recipe.recipe_id or "") else "#fcfdff"), "display": "grid", "gap": "8px"}}>
+                                <div style={{"display": "flex", "justifyContent": "space-between", "gap": "8px"}}>
+                                    <h3 style={{"margin": "0", "fontSize": "1.05rem"}}>{recipe.title}</h3>
+                                    <div style={{"display": "flex", "gap": "6px", "alignItems": "center"}}>
+                                        <button data-recipe-id={String(recipe.recipe_id or "")} onClick={handle_saved_recipe_favorite_click} style={{"border": "1px solid #fbcfe8", "background": "#fdf2f8", "borderRadius": "8px", "padding": "4px 8px"}}>
+                                            {("★ Favorite" if recipe.favorite else "☆ Favorite")}
+                                        </button>
+                                        <button data-recipe-id={String(recipe.recipe_id or "")} onClick={handle_saved_recipe_delete_click} title="Delete saved recipe" style={{"border": "1px solid #fecaca", "background": "#fff1f2", "borderRadius": "8px", "padding": "4px 8px"}}>
+                                            🗑
+                                        </button>
+                                    </div>
+                                </div>
+                                <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap", "fontSize": "0.9rem", "opacity": "0.78"}}>
+                                    <span>Generated: {format_saved_time(recipe)}</span>
+                                    {(
+                                        <span style={{"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #86efac", "background": "#dcfce7", "color": "#166534", "fontWeight": "800", "opacity": "1"}}>
+                                            Past Recipe
+                                        </span>
+                                    ) if recipe.made else None}
+                                    {(
+                                        <span>Made: {format_made_time(recipe)}</span>
+                                    ) if recipe.made else None}
+                                </div>
+                                {(
+                                    <div style={{"padding": "9px 10px", "borderRadius": "10px", "border": "1px solid #bfdbfe", "background": "#eff6ff", "fontWeight": "700"}}>
+                                        You made this recipe. Choose a tier now to rate it.
+                                    </div>
+                                ) if pending_rate_recipe_id == String(recipe.recipe_id or "") else None}
+                                <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"}}>
+                                    <span style={rating_badge_style(recipe)}>{rating_display_text(recipe)}</span>
+                                    <span style={tier_chip_style(recipe_tier(recipe))}>{tier_label(recipe_tier(recipe))}</span>
+                                    {(
+                                        <span style={{"fontSize": "0.85rem", "opacity": "0.72"}}>
+                                            Slot #{String(rating_order_value(recipe) + 1)}
+                                        </span>
+                                    ) if rating_order_value(recipe) >= 0 else None}
+                                </div>
+                                <div style={{"display": "grid", "gap": "8px", "padding": "10px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#f8fafc"}}>
+                                    <div style={{"fontWeight": "800"}}>
+                                        {("Re-rank This Recipe" if recipe_tier(recipe) != "" else "Rank This Recipe")}
+                                    </div>
+                                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
                                         <button
-                                            key={rating_val.toString()}
-                                            onClick={lambda -> None { set_rating(recipe.id, rating_val); }}
-                                            style={{"border": "1px solid #e2e8f0", "background": ("#fde68a" if rating_val <= recipe.rating else "#ffffff"), "borderRadius": "6px", "padding": "3px 6px"}}
+                                            data-recipe-id={String(recipe.recipe_id or "")}
+                                            data-tier="very_good"
+                                            onClick={handle_rank_tier_click}
+                                            style={tier_button_style("very_good", active_rank_recipe_id == String(recipe.recipe_id or "") and active_rank_tier == "very_good")}
                                         >
-                                            {String(rating_val)}
-                                        </button>; }
-                                )}
-                            </div>
-                            <div style={{"fontSize": "0.9rem"}}><b>Notes:</b> {recipe.notes}</div>
-                        </div>; }
+                                            Very Good
+                                        </button>
+                                        <button
+                                            data-recipe-id={String(recipe.recipe_id or "")}
+                                            data-tier="average"
+                                            onClick={handle_rank_tier_click}
+                                            style={tier_button_style("average", active_rank_recipe_id == String(recipe.recipe_id or "") and active_rank_tier == "average")}
+                                        >
+                                            Average
+                                        </button>
+                                        <button
+                                            data-recipe-id={String(recipe.recipe_id or "")}
+                                            data-tier="not_great"
+                                            onClick={handle_rank_tier_click}
+                                            style={tier_button_style("not_great", active_rank_recipe_id == String(recipe.recipe_id or "") and active_rank_tier == "not_great")}
+                                        >
+                                            Not Great
+                                        </button>
+                                    </div>
+                                    {(
+                                        <div style={{"display": "grid", "gap": "8px", "padding": "10px", "borderRadius": "10px", "border": "1px solid #bfdbfe", "background": "#eff6ff"}}>
+                                            <div style={{"fontWeight": "800"}}>Binary Placement: {tier_label(active_rank_tier)}</div>
+                                            <div style={{"fontSize": "0.92rem", "lineHeight": "1.45"}}>
+                                                Compare this recipe with the middle recipe in the selected tier. Each answer cuts the remaining search range down until the exact slot is found.
+                                            </div>
+                                            <div style={{"display": "grid", "gridTemplateColumns": "1fr auto 1fr", "gap": "8px", "alignItems": "center"}}>
+                                                <div style={{"padding": "9px", "borderRadius": "10px", "border": "1px solid #86efac", "background": "#f0fdf4"}}>
+                                                    <div style={{"fontWeight": "800"}}>{recipe.title}</div>
+                                                    <div style={{"opacity": "0.74", "fontSize": "0.88rem"}}>New placement candidate</div>
+                                                </div>
+                                                <div style={{"fontWeight": "800", "opacity": "0.66"}}>vs</div>
+                                                <div style={{"padding": "9px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff"}}>
+                                                    <div style={{"fontWeight": "800"}}>{current_rank_comparison().title}</div>
+                                                    <div style={{"opacity": "0.74", "fontSize": "0.88rem"}}>
+                                                        Current score: {rating_display_text(current_rank_comparison())}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
+                                                <button data-current-wins="true" onClick={handle_rank_compare_click} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #15803d", "background": "#dcfce7", "fontWeight": "800"}}>
+                                                    This Recipe Is Better
+                                                </button>
+                                                <button data-current-wins="false" onClick={handle_rank_compare_click} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #475569", "background": "#e2e8f0", "fontWeight": "800"}}>
+                                                    {String(current_rank_comparison().title or "Compared Recipe")} Is Better
+                                                </button>
+                                                <button onClick={clear_ranking_session} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff", "fontWeight": "700"}}>
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) if active_rank_recipe_id == String(recipe.recipe_id or "") else None}
+                                </div>
+                                <div style={{"fontSize": "0.9rem"}}><b>Notes:</b> {recipe.notes}</div>
+                            </div>; }
+                    )
                 )}
             </div>
         </div>;

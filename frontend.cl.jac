@@ -4,7 +4,7 @@ import from tab_user_profile { UserProfileTab }
 import from tab_recipes { RecipesTab }
 import from tab_nutrition { NutritionTab }
 import from "@jac/runtime" { jacSignup, jacLogin, jacLogout, jacIsLoggedIn }
-sv import from user { SavePantryState, GetPantryState, SaveNutritionState, GetNutritionState, GetUserProfile }
+sv import from user { SavePantryState, GetPantryState, SaveNutritionState, GetNutritionState, GetUserProfile, SaveUserProfile }
 
 def:pub app() -> JsxElement {
     has active_tab: str = "receipt";
@@ -22,6 +22,17 @@ def:pub app() -> JsxElement {
     has current_user_display: str = "";
     has is_hydrating_user_state: bool = false;
     has pantry_merge_timer_id: int = -1;
+    has requires_profile_setup: bool = false;
+    has signup_name: str = "";
+    has signup_age: str = "";
+    has signup_height: str = "";
+    has signup_weight: str = "";
+    has signup_goal_weight: str = "";
+    has signup_sex: str = "MALE";
+    has signup_fitness_level: str = "MODERATELY_ACTIVE";
+    has signup_goal: str = "MAINTENANCE";
+    has signup_dietary_notes: str = "";
+    has signup_allergy_notes: str = "";
 
     def tab_button_style(tab_id: str) -> dict {
         is_active = active_tab == tab_id;
@@ -213,6 +224,62 @@ def:pub app() -> JsxElement {
         return idx;
     }
 
+    def split_csv(text: str) -> list {
+        return String(text or "").split(",").map(
+            lambda item: str -> str { return item.trim(); }
+        ).filter(
+            lambda item: str -> bool { return item.length > 0; }
+        );
+    }
+
+    def parse_profile_num(raw: str, fallback: float = -1.0) -> float {
+        parsed = parseFloat(String(raw or "").trim());
+        if isNaN(parsed) {
+            return fallback;
+        }
+        return parsed;
+    }
+
+    def build_signup_profile_payload() -> dict {
+        age_num = parseInt(String(signup_age or "").trim());
+        height_num = parse_profile_num(signup_height, -1.0);
+        weight_num = parse_profile_num(signup_weight, -1.0);
+        goal_weight_num = parse_profile_num(signup_goal_weight, 0.0);
+
+        if isNaN(age_num) or age_num <= 0 or height_num <= 0 or weight_num <= 0 {
+            return {};
+        }
+        if goal_weight_num < 0 {
+            goal_weight_num = 0.0;
+        }
+
+        return {
+            "username": String(signup_name or "").trim(),
+            "age": age_num,
+            "sex": signup_sex,
+            "height": height_num,
+            "weight": weight_num,
+            "goal_weight": goal_weight_num,
+            "dietary_restrictions": split_csv(signup_dietary_notes),
+            "allergies": split_csv(signup_allergy_notes),
+            "fitness_level": signup_fitness_level,
+            "goal": signup_goal
+        };
+    }
+
+    def reset_signup_survey() -> None {
+        signup_name = "";
+        signup_age = "";
+        signup_height = "";
+        signup_weight = "";
+        signup_goal_weight = "";
+        signup_sex = "MALE";
+        signup_fitness_level = "MODERATELY_ACTIVE";
+        signup_goal = "MAINTENANCE";
+        signup_dietary_notes = "";
+        signup_allergy_notes = "";
+    }
+
     def cache_key(suffix: str) -> str {
         user_key = auth_email.trim().toLowerCase();
         if user_key.length == 0 {
@@ -296,6 +363,8 @@ def:pub app() -> JsxElement {
     def reset_local_user_state() -> None {
         set_app_state([], default_nutrition_history(), 0);
         current_user_display = "";
+        requires_profile_setup = false;
+        reset_signup_survey();
     }
 
     def set_current_user_display_from_profile(profile: dict = {}) -> None {
@@ -483,7 +552,7 @@ def:pub app() -> JsxElement {
         return {"ok": false, "error": parts.join(" | ")};
     }
 
-    async def load_user_state() -> None {
+    async def load_user_state() -> dict {
         ensure_app_state_defaults();
         try {
             fallback_pantry = load_cached_pantry();
@@ -491,6 +560,8 @@ def:pub app() -> JsxElement {
             next_pantry = fallback_pantry;
             next_weekly = fallback_nutrition.weekly_history;
             next_idx = fallback_nutrition.selected_day_index;
+            has_profile = false;
+            profile_payload = {};
 
             pantry_result = root spawn GetPantryState();
             pantry_out = first_report_payload(pantry_result);
@@ -517,9 +588,14 @@ def:pub app() -> JsxElement {
             profile_out = first_report_payload(profile_result);
             if profile_out and profile_out.error {
                 set_current_user_display_from_profile({});
+            } elif profile_out and Object.keys(profile_out).length > 0 {
+                has_profile = true;
+                profile_payload = profile_out;
+                set_current_user_display_from_profile(profile_out);
             } else {
-                set_current_user_display_from_profile(profile_out or {});
+                set_current_user_display_from_profile({});
             }
+            return {"has_profile": has_profile, "profile": profile_payload};
         } except Exception as e {
             fallback_nutrition = load_cached_nutrition();
             set_app_state(
@@ -528,7 +604,36 @@ def:pub app() -> JsxElement {
                 fallback_nutrition.selected_day_index
             );
             set_current_user_display_from_profile({});
+            return {"has_profile": false, "profile": {}};
         }
+    }
+
+    async def complete_profile_setup() -> None {
+        profile_payload = build_signup_profile_payload();
+        if Object.keys(profile_payload).length == 0 {
+            auth_status = "Enter valid age, height, and current weight to continue.";
+            return;
+        }
+
+        auth_loading = true;
+        auth_status = "Saving your profile...";
+        try {
+            save_out = first_report_payload(root spawn SaveUserProfile(profile=profile_payload));
+            if save_out and save_out.saved == false {
+                auth_status = "Profile setup failed: " + error_message(save_out.error, "Unable to save profile.");
+                auth_loading = false;
+                return;
+            }
+            set_current_user_display_from_profile(profile_payload);
+            await load_user_state();
+            requires_profile_setup = false;
+            active_tab = "dashboard";
+            auth_status = "Profile saved. Welcome to CaloReceipt.";
+            reset_signup_survey();
+        } except Exception as e {
+            auth_status = "Profile setup failed: " + error_message(e, "Unknown save error.");
+        }
+        auth_loading = false;
     }
 
     async def save_pantry_state(items: list) -> None {
@@ -597,8 +702,13 @@ def:pub app() -> JsxElement {
             is_hydrating_user_state = true;
             current_user_display = email;
             try {
-                await load_user_state();
-                auth_status = "Signed in.";
+                load_out = await load_user_state();
+                requires_profile_setup = (not load_out.has_profile);
+                if requires_profile_setup {
+                    auth_status = "Complete your profile before entering the dashboard.";
+                } else {
+                    auth_status = "Signed in.";
+                }
             } except Exception as e {
                 auth_status = "Signed in, but failed to load user data: " + error_message(e, "Unknown load error.");
             }
@@ -636,10 +746,11 @@ def:pub app() -> JsxElement {
             is_hydrating_user_state = true;
             current_user_display = email;
             try {
-                await load_user_state();
-                auth_status = "Account created and signed in.";
+                reset_signup_survey();
+                requires_profile_setup = true;
+                auth_status = "Account created. Complete your profile to continue.";
             } except Exception as e {
-                auth_status = "Account created and signed in, but failed to load user data: " + error_message(e, "Unknown load error.");
+                auth_status = "Account created, but onboarding failed: " + error_message(e, "Unknown load error.");
             }
             is_hydrating_user_state = false;
             auth_password = "";
@@ -744,7 +855,7 @@ def:pub app() -> JsxElement {
                     <div>
                         <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>CaloReceipt</h1>
                         <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                            Sign in to access your private profile, pantry, and recipe graph.
+                            {("Create your account first. We will ask for your profile right after signup." if auth_mode == "signup" else "Sign in to access your private profile, pantry, and recipe graph.")}
                         </p>
                     </div>
                     <div style={{"display": "flex", "gap": "8px"}}>
@@ -808,6 +919,143 @@ def:pub app() -> JsxElement {
                     </div>
                     <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
                         {auth_error_text()}
+                    </div>
+                </div>
+            </div>;
+    }
+
+    if requires_profile_setup {
+        return
+            <div
+                style={{
+                    "minHeight": "100vh",
+                    "background": "radial-gradient(circle at 5% 10%, #ffe5b4 0%, #ffe5b400 30%), radial-gradient(circle at 95% 0%, #b7d7ff 0%, #b7d7ff00 35%), linear-gradient(135deg, #f4f8ff 0%, #f6fffb 50%, #fff7ef 100%)",
+                    "fontFamily": "'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif",
+                    "color": "#10243f",
+                    "padding": "22px"
+                }}
+            >
+                <div
+                    style={{
+                        "maxWidth": "980px",
+                        "margin": "0 auto",
+                        "background": "#ffffffde",
+                        "border": "1px solid #d2e3f5",
+                        "borderRadius": "18px",
+                        "padding": "22px",
+                        "display": "grid",
+                        "gap": "16px"
+                    }}
+                >
+                    <div style={{"display": "flex", "justifyContent": "space-between", "gap": "12px", "alignItems": "center", "flexWrap": "wrap"}}>
+                        <div>
+                            <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>Finish Your Profile</h1>
+                            <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
+                                One quick survey before you enter the main dashboard. These answers personalize recipes, pantry planning, and nutrition targets.
+                            </p>
+                        </div>
+                        <div style={{"padding": "8px 12px", "border": "1px solid #fbbf24", "background": "#fffbeb", "borderRadius": "999px", "fontWeight": "700"}}>
+                            Step Required
+                        </div>
+                    </div>
+
+                    <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
+                        {auth_error_text()}
+                    </div>
+
+                    <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(260px, 1fr))", "gap": "12px"}}>
+                        <div style={{"border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>
+                            <div>
+                                <div style={{"fontWeight": "800"}}>About You</div>
+                                <div style={{"opacity": "0.76", "fontSize": "0.92rem"}}>Tell us the basics we need for your profile.</div>
+                            </div>
+                            <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(150px, 1fr))", "gap": "10px"}}>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Name</label>
+                                    <input value={signup_name} onChange={lambda e: any -> None { signup_name = e.target.value; }} placeholder="Preferred name" style={{"width": "100%", "padding": "10px", "border": "1px solid #bfdbfe", "borderRadius": "10px"}} />
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Age</label>
+                                    <input value={signup_age} onChange={lambda e: any -> None { signup_age = e.target.value; }} placeholder="Years" style={{"width": "100%", "padding": "10px", "border": "1px solid #bfdbfe", "borderRadius": "10px"}} />
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Sex</label>
+                                    <select value={signup_sex} onChange={lambda e: any -> None { signup_sex = e.target.value; }} style={{"width": "100%", "padding": "10px", "border": "1px solid #bfdbfe", "borderRadius": "10px"}}>
+                                        <option value="MALE">Male</option>
+                                        <option value="FEMALE">Female</option>
+                                        <option value="OTHER">Other</option>
+                                        <option value="PREFER_NOT_TO_SAY">Prefer not to say</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style={{"border": "1px solid #dcfce7", "background": "#f0fdf4", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>
+                            <div>
+                                <div style={{"fontWeight": "800"}}>Body Metrics</div>
+                                <div style={{"opacity": "0.76", "fontSize": "0.92rem"}}>We use these to tailor calories, macros, and portion suggestions.</div>
+                            </div>
+                            <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(150px, 1fr))", "gap": "10px"}}>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Height (in)</label>
+                                    <input value={signup_height} onChange={lambda e: any -> None { signup_height = e.target.value; }} placeholder="70" style={{"width": "100%", "padding": "10px", "border": "1px solid #86efac", "borderRadius": "10px"}} />
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Current Weight (lb)</label>
+                                    <input value={signup_weight} onChange={lambda e: any -> None { signup_weight = e.target.value; }} placeholder="170" style={{"width": "100%", "padding": "10px", "border": "1px solid #86efac", "borderRadius": "10px"}} />
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Goal Weight (lb)</label>
+                                    <input value={signup_goal_weight} onChange={lambda e: any -> None { signup_goal_weight = e.target.value; }} placeholder="Optional" style={{"width": "100%", "padding": "10px", "border": "1px solid #86efac", "borderRadius": "10px"}} />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style={{"border": "1px solid #fde68a", "background": "#fffbeb", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>
+                            <div>
+                                <div style={{"fontWeight": "800"}}>Goals And Food Preferences</div>
+                                <div style={{"opacity": "0.76", "fontSize": "0.92rem"}}>Set your activity level, overall goal, restrictions, and allergies.</div>
+                            </div>
+                            <div style={{"display": "grid", "gap": "10px"}}>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Fitness Level</label>
+                                    <select value={signup_fitness_level} onChange={lambda e: any -> None { signup_fitness_level = e.target.value; }} style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}}>
+                                        <option value="SEDENTARY">Sedentary</option>
+                                        <option value="LIGHTLY_ACTIVE">Lightly active</option>
+                                        <option value="MODERATELY_ACTIVE">Moderately active</option>
+                                        <option value="VERY_ACTIVE">Very active</option>
+                                        <option value="ATHLETE">Athlete</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Overall Goal</label>
+                                    <select value={signup_goal} onChange={lambda e: any -> None { signup_goal = e.target.value; }} style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}}>
+                                        <option value="FAT_LOSS">Fat loss</option>
+                                        <option value="MAINTENANCE">Maintenance</option>
+                                        <option value="LEAN_BULK">Lean bulk</option>
+                                        <option value="MUSCLE_GAIN">Muscle gain</option>
+                                        <option value="ENDURANCE_PERFORMANCE">Endurance performance</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Dietary Restrictions</label>
+                                    <input value={signup_dietary_notes} onChange={lambda e: any -> None { signup_dietary_notes = e.target.value; }} placeholder="Comma-separated, e.g. vegetarian, halal" style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}} />
+                                </div>
+                                <div>
+                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Allergies</label>
+                                    <input value={signup_allergy_notes} onChange={lambda e: any -> None { signup_allergy_notes = e.target.value; }} placeholder="Comma-separated, e.g. peanuts, shellfish" style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}} />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
+                        <button onClick={complete_profile_setup} style={{"padding": "10px 14px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}>
+                            Save And Enter Dashboard
+                        </button>
+                        <button onClick={do_logout} style={{"padding": "10px 14px", "borderRadius": "10px", "border": "1px solid #991b1b", "background": "#fee2e2", "fontWeight": "700"}}>
+                            Log Out
+                        </button>
                     </div>
                 </div>
             </div>;
@@ -909,6 +1157,7 @@ def:pub app() -> JsxElement {
                         shared_state={app_state}
                         on_auth_error={handle_auth_required}
                         on_pantry_change={save_pantry_state}
+                        is_active={active_tab == "receipt"}
                     />
                 </div>
                 <div style={{"display": ("block" if active_tab == "dashboard" else "none")}}>

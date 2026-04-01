@@ -42,10 +42,15 @@ def:pub RecipesTab(
     has active_rank_low: int = 0;
     has active_rank_high: int = -1;
     has active_rank_mid: int = -1;
+    has re_rank_recipe_id: str = "";
     has pending_rate_recipe_id: str = "";
     has show_made_confirm: bool = false;
+    has expanded_recipe_id: str = "";
 
     def first_report_payload(raw_result: dict) -> dict {
+        if not raw_result {
+            return {};
+        }
         if raw_result.reports and raw_result.reports.length > 0 {
             return raw_result.reports[0];
         }
@@ -117,8 +122,51 @@ def:pub RecipesTab(
         return parsed;
     }
 
+    def normalized_profile_choice(raw: any) -> str {
+        return String(raw or "").trim().toUpperCase();
+    }
+
+    def profile_has_key_info(profile: dict = {}) -> bool {
+        if not profile {
+            return false;
+        }
+
+        age_num = parseInt(String(profile.age or "").trim());
+        height_num = to_num(String(profile.height or ""), -1.0);
+        weight_num = to_num(String(profile.weight or ""), -1.0);
+        sex_val = normalized_profile_choice(profile.sex);
+        fitness_val = normalized_profile_choice(profile.fitness_level);
+        goal_val = normalized_profile_choice(profile.goal);
+
+        if isNaN(age_num) or age_num <= 0 or height_num <= 0 or weight_num <= 0 {
+            return false;
+        }
+        if not (sex_val == "MALE" or sex_val == "FEMALE" or sex_val == "OTHER" or sex_val == "PREFER_NOT_TO_SAY") {
+            return false;
+        }
+        if not (
+            fitness_val == "SEDENTARY" or
+            fitness_val == "LIGHTLY_ACTIVE" or
+            fitness_val == "MODERATELY_ACTIVE" or
+            fitness_val == "VERY_ACTIVE" or
+            fitness_val == "ATHLETE"
+        ) {
+            return false;
+        }
+        if not (
+            goal_val == "FAT_LOSS" or
+            goal_val == "MAINTENANCE" or
+            goal_val == "LEAN_BULK" or
+            goal_val == "MUSCLE_GAIN" or
+            goal_val == "ENDURANCE_PERFORMANCE"
+        ) {
+            return false;
+        }
+        return true;
+    }
+
     def is_listish(raw: any) -> bool {
-        if raw == None {
+        if not raw {
             return false;
         }
         if Array.isArray(raw) {
@@ -171,8 +219,178 @@ def:pub RecipesTab(
         return String(raw or "PIECE").trim().toUpperCase();
     }
 
+    def total_quantity_value(item: any) -> float {
+        package_qty = parseFloat(String(item.package_quantity or "0").trim());
+        if not isNaN(package_qty) and package_qty > 0.0 {
+            return package_qty;
+        }
+        serving_qty = parseFloat(String(item.quantity or "0").trim());
+        if not isNaN(serving_qty) and serving_qty > 0.0 {
+            return serving_qty;
+        }
+        return 0.0;
+    }
+
+    def total_quantity_unit(item: any) -> str {
+        package_unit = norm_unit(item.package_unit);
+        if package_unit != "PIECE" or total_quantity_value(item) > 0.0 {
+            if String(item.package_unit or "").trim().length > 0 {
+                return package_unit;
+            }
+        }
+        return norm_unit(item.unit);
+    }
+
+    def serving_size_display(item: any) -> str {
+        serving_text = String(item.serving_size or "").trim();
+        if serving_text.length > 0 {
+            return serving_text;
+        }
+        unit_text = norm_unit(item.unit);
+        if unit_text == "PIECE" {
+            return "1 piece";
+        }
+        if unit_text == "TBSP" {
+            return "1 tbsp";
+        }
+        if unit_text == "TSP" {
+            return "1 tsp";
+        }
+        if unit_text == "CUP" {
+            return "1 cup";
+        }
+        if unit_text == "CLOVE" {
+            return "1 clove";
+        }
+        if unit_text == "BUNCH" {
+            return "1 bunch";
+        }
+        if unit_text == "OZ" {
+            return "1 oz";
+        }
+        if unit_text == "LB" {
+            return "1 lb";
+        }
+        return "-";
+    }
+
     def round_two(value: float) -> float {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    def singular_food_token(token: str) -> str {
+        clean = String(token or "").trim().toLowerCase();
+        if clean.endsWith("ies") and clean.length > 3 {
+            return clean.slice(0, clean.length - 3) + "y";
+        }
+        if clean.endsWith("es") and clean.length > 3 {
+            return clean.slice(0, clean.length - 2);
+        }
+        if clean.endsWith("s") and clean.length > 3 {
+            return clean.slice(0, clean.length - 1);
+        }
+        return clean;
+    }
+
+    def food_name_tokens(raw: any) -> list {
+        stop_words = [
+            "fresh", "organic", "whole", "plain", "raw", "boneless", "skinless",
+            "low", "sodium", "reduced", "fat", "free", "light", "natural"
+        ];
+        return norm_name(raw).split(" ").map(
+            lambda token: str -> str : singular_food_token(token)
+        ).filter(
+            lambda token: str -> bool {
+                return token.length > 0 and stop_words.indexOf(token) < 0;
+            }
+        );
+    }
+
+    def food_name_match_score(left: any, right: any) -> float {
+        left_norm = norm_name(left);
+        right_norm = norm_name(right);
+        if left_norm.length == 0 or right_norm.length == 0 {
+            return 0.0;
+        }
+        if left_norm == right_norm {
+            return 100.0;
+        }
+        if left_norm.includes(right_norm) or right_norm.includes(left_norm) {
+            return 85.0;
+        }
+
+        left_tokens = food_name_tokens(left);
+        right_tokens = food_name_tokens(right);
+        if left_tokens.length == 0 or right_tokens.length == 0 {
+            return 0.0;
+        }
+
+        shared_count = 0;
+        for token in left_tokens {
+            if right_tokens.indexOf(token) >= 0 {
+                shared_count = shared_count + 1;
+            }
+        }
+        if shared_count == 0 {
+            return 0.0;
+        }
+
+        return (
+            (shared_count * 60.0) / left_tokens.length +
+            (shared_count * 40.0) / right_tokens.length
+        );
+    }
+
+    def unit_group(unit_text: str) -> str {
+        if unit_text == "LB" or unit_text == "OZ" {
+            return "mass";
+        }
+        if unit_text == "CUP" or unit_text == "TBSP" or unit_text == "TSP" {
+            return "volume";
+        }
+        return unit_text;
+    }
+
+    def unit_factor(unit_text: str) -> float {
+        if unit_text == "LB" {
+            return 16.0;
+        }
+        if unit_text == "OZ" {
+            return 1.0;
+        }
+        if unit_text == "CUP" {
+            return 48.0;
+        }
+        if unit_text == "TBSP" {
+            return 3.0;
+        }
+        if unit_text == "TSP" {
+            return 1.0;
+        }
+        if unit_text == "PIECE" or unit_text == "CLOVE" or unit_text == "BUNCH" {
+            return 1.0;
+        }
+        return 0.0;
+    }
+
+    def convert_quantity(quantity: float, from_unit_raw: any, to_unit_raw: any) -> float {
+        from_unit = norm_unit(from_unit_raw);
+        to_unit = norm_unit(to_unit_raw);
+        if quantity < 0.0 {
+            return -1.0;
+        }
+        if from_unit == to_unit {
+            return quantity;
+        }
+        if unit_group(from_unit) != unit_group(to_unit) {
+            return -1.0;
+        }
+        from_factor = unit_factor(from_unit);
+        to_factor = unit_factor(to_unit);
+        if from_factor <= 0.0 or to_factor <= 0.0 {
+            return -1.0;
+        }
+        return (quantity * from_factor) / to_factor;
     }
 
     def legacy_rating_to_scale(raw_rating: float) -> float {
@@ -299,9 +517,44 @@ def:pub RecipesTab(
         return to_int(recipe.made_at_ms, 0);
     }
 
+    def clone_recipe_instructions(raw: any) -> list {
+        if not is_listish(raw) {
+            return [];
+        }
+        return raw.map(
+            lambda step: any -> str { return String(step or "").trim(); }
+        ).filter(
+            lambda step: str -> bool { return step.length > 0; }
+        );
+    }
+
+    def clone_recipe_ingredients(raw: any) -> list {
+        if not is_listish(raw) {
+            return [];
+        }
+        return raw.map(
+            lambda item: dict -> dict { return
+                {
+                    "name": String(item.name or "").trim(),
+                    "quantity": to_num(String(item.quantity or "0"), 0.0),
+                    "unit": norm_unit(item.unit),
+                    "cost": to_num(String(item.cost or "0"), 0.0),
+                    "protein": to_num(String(item.protein or "0"), 0.0),
+                    "carb": to_num(String(item.carb or "0"), 0.0),
+                    "fat": to_num(String(item.fat or "0"), 0.0),
+                    "serving_size": String(item.serving_size or "").trim(),
+                    "package_quantity": to_num(String(item.package_quantity or "0"), 0.0),
+                    "package_unit": norm_unit(item.package_unit)
+                }; }
+        ).filter(
+            lambda item: dict -> bool { return String(item.name or "").trim().length > 0; }
+        );
+    }
+
     def clone_recipe(recipe: dict) -> dict {
         return {
             "recipe_id": String(recipe.recipe_id or ""),
+            "recipe_key": recipe_lookup_key(recipe),
             "title": String(recipe.title or recipe.recipe_name or ""),
             "total_calories": to_num(String(recipe.total_calories or "0"), 0.0),
             "total_protein_g": to_num(String(recipe.total_protein_g or "0"), 0.0),
@@ -314,7 +567,9 @@ def:pub RecipesTab(
             "favorite": (true if recipe.favorite else false),
             "made": (true if recipe.made else false),
             "made_at_ms": made_time_value(recipe),
-            "notes": String(recipe.notes or "Generated from your profile + pantry")
+            "notes": String(recipe.notes or "Generated from your profile + pantry"),
+            "instructions": clone_recipe_instructions(recipe.instructions),
+            "ingredients": clone_recipe_ingredients(recipe.ingredients)
         };
     }
 
@@ -336,13 +591,45 @@ def:pub RecipesTab(
         );
     }
 
+    def legacy_recipe_key(title: any, generated_at_ms: any) -> str {
+        clean_title = norm_name(title);
+        stamp = to_int(generated_at_ms, 0);
+        return ["legacy", String(stamp), clean_title].join("::");
+    }
+
+    def recipe_lookup_key(recipe: dict) -> str {
+        recipe_id = String(recipe.recipe_id or "").trim();
+        if recipe_id != "" {
+            return recipe_id;
+        }
+        return legacy_recipe_key(
+            String(recipe.title or recipe.recipe_name or ""),
+            recipe.generated_at_ms
+        );
+    }
+
+    def row_lookup_key(row: dict) -> str {
+        recipe_key = String(row.recipe_key or "").trim();
+        if recipe_key != "" {
+            return recipe_key;
+        }
+        recipe_id = String(row.recipe_id or "").trim();
+        if recipe_id != "" {
+            return recipe_id;
+        }
+        return legacy_recipe_key(
+            String(row.title or row.recipe_name or ""),
+            row.generated_at_ms
+        );
+    }
+
     def tier_recipes_sorted(tier: str, exclude_recipe_id: str = "") -> list {
         return sort_ranked_recipes(
             recipes.filter(
                 lambda recipe: dict -> bool {
                     return (
                         recipe_tier(recipe) == tier and
-                        String(recipe.recipe_id or "") != exclude_recipe_id
+                        recipe_lookup_key(recipe) != exclude_recipe_id
                     );
                 }
             )
@@ -369,7 +656,10 @@ def:pub RecipesTab(
             ranked_recipe = ranked_recipes[idx];
             updates = updates.concat([{
                 "recipe_id": String(ranked_recipe.recipe_id or ""),
-                "rating": score_for_tier_position(tier, idx, total),
+                "recipe_key": recipe_lookup_key(ranked_recipe),
+                "title": String(ranked_recipe.title or ""),
+                "generated_at_ms": generated_time_value(ranked_recipe),
+                "rating": 0.0,
                 "rating_tier": tier,
                 "rating_order": idx
             }]);
@@ -380,14 +670,18 @@ def:pub RecipesTab(
     def apply_rank_updates(base_recipes: list, updates: list) -> list {
         update_map: dict = {};
         for row in updates {
-            update_map[String(row.recipe_id or "")] = row;
+            update_map[row_lookup_key(row)] = row;
         }
         next_recipes: list = [];
         for recipe in base_recipes {
-            recipe_id = String(recipe.recipe_id or "");
-            row = update_map.get(recipe_id, None);
+            recipe_id = recipe_lookup_key(recipe);
+            row = update_map[recipe_id] or None;
             next_recipe = clone_recipe(recipe);
             if row != None {
+                if String(row.recipe_id or "").trim() != "" {
+                    next_recipe.recipe_id = String(row.recipe_id or "").trim();
+                }
+                next_recipe.recipe_key = row_lookup_key(row);
                 next_recipe.rating = to_num(String(row.rating or "0"), 0.0);
                 next_recipe.rating_tier = String(row.rating_tier or "").trim().toLowerCase();
                 next_recipe.rating_order = to_int(row.rating_order, -1);
@@ -404,6 +698,7 @@ def:pub RecipesTab(
         active_rank_low = 0;
         active_rank_high = -1;
         active_rank_mid = -1;
+        re_rank_recipe_id = "";
     }
 
     def current_rank_comparison() -> dict {
@@ -411,6 +706,24 @@ def:pub RecipesTab(
             return {};
         }
         return active_rank_candidates[active_rank_mid];
+    }
+
+    def rank_comparison_from(candidates: list, mid: int) -> dict {
+        if mid < 0 or mid >= candidates.length {
+            return {};
+        }
+        return candidates[mid];
+    }
+
+    def show_rank_controls(recipe: dict) -> bool {
+        recipe_key = recipe_lookup_key(recipe);
+        if active_rank_recipe_id == recipe_key {
+            return true;
+        }
+        if recipe_tier(recipe) == "" {
+            return true;
+        }
+        return re_rank_recipe_id == recipe_key;
     }
 
     def rating_display_text(recipe: dict) -> str {
@@ -598,11 +911,15 @@ def:pub RecipesTab(
 
     def recipe_by_id(recipe_id: str) -> dict {
         for recipe in recipes {
-            if String(recipe.recipe_id or "") == recipe_id {
+            if recipe_lookup_key(recipe) == recipe_id {
                 return recipe;
             }
         }
         return {};
+    }
+
+    def recipe_details_open(recipe: dict) -> bool {
+        return expanded_recipe_id == recipe_lookup_key(recipe);
     }
 
     def generated_recipe_history_entry() -> dict {
@@ -628,7 +945,9 @@ def:pub RecipesTab(
             "favorite": false,
             "made": made,
             "made_at_ms": (made_at_ms if made else 0),
-            "notes": "Generated from your profile + pantry"
+            "notes": "Generated from your profile + pantry",
+            "instructions": clone_recipe_instructions(generated_recipe.instructions),
+            "ingredients": clone_recipe_ingredients(generated_recipe.ingredients)
         };
     }
 
@@ -654,6 +973,9 @@ def:pub RecipesTab(
         recipes = recipes.filter(
             lambda recipe: dict -> bool { return String(recipe.recipe_id or "") != recipe_id; }
         );
+        if expanded_recipe_id == recipe_id {
+            expanded_recipe_id = "";
+        }
     }
 
     def generate_new_recipe() -> None {
@@ -704,7 +1026,10 @@ def:pub RecipesTab(
             "cost": to_num(pantry_cost, 0.0),
             "protein": to_num(pantry_protein, 0.0),
             "carb": to_num(pantry_carb, 0.0),
-            "fat": to_num(pantry_fat, 0.0)
+            "fat": to_num(pantry_fat, 0.0),
+            "serving_size": ["1 ", pantry_unit].join(""),
+            "package_quantity": to_num(pantry_quantity, 1.0),
+            "package_unit": pantry_unit
         }]));
 
         pantry_name = "";
@@ -714,7 +1039,7 @@ def:pub RecipesTab(
         pantry_protein = "0";
         pantry_carb = "0";
         pantry_fat = "0";
-        status_text = "Pantry ingredient added.";
+        status_text = "Pantry ingredient added as per-serving storage.";
     }
 
     async def remove_pantry_item(name: str) -> None {
@@ -743,7 +1068,10 @@ def:pub RecipesTab(
                     "cost": to_num(String(item.cost or "0"), 0.0),
                     "protein": to_num(String(item.protein or "0"), 0.0),
                     "carb": to_num(String(item.carb or "0"), 0.0),
-                    "fat": to_num(String(item.fat or "0"), 0.0)
+                    "fat": to_num(String(item.fat or "0"), 0.0),
+                    "serving_size": String(item.serving_size or "").trim(),
+                    "package_quantity": to_num(String(item.package_quantity or "0"), 0.0),
+                    "package_unit": norm_unit(item.package_unit)
                 }; }
         );
 
@@ -752,37 +1080,74 @@ def:pub RecipesTab(
             if remaining_qty <= 0.0 {
                 continue;
             }
-            ingredient_name = norm_name(ingredient.name);
+            ingredient_name = String(ingredient.name or "");
             ingredient_unit = norm_unit(ingredient.unit);
-            updated_pantry: list = [];
+            while remaining_qty > 0.0001 {
+                best_idx = -1;
+                best_score = 0.0;
+                best_needed_qty = -1.0;
+                idx = 0;
+                for item in next_pantry {
+                    item_qty = to_num(String(item.quantity or "0"), 0.0);
+                    needed_in_item_unit = convert_quantity(remaining_qty, ingredient_unit, item.unit);
+                    if item_qty > 0.0 and needed_in_item_unit > 0.0 {
+                        match_score = food_name_match_score(ingredient_name, item.name);
+                        if match_score > best_score {
+                            best_idx = idx;
+                            best_score = match_score;
+                            best_needed_qty = needed_in_item_unit;
+                        }
+                    }
+                    idx = idx + 1;
+                }
+                if best_idx < 0 or best_score < 55.0 or best_needed_qty <= 0.0 {
+                    break;
+                }
 
-            for item in next_pantry {
-                item_qty = to_num(String(item.quantity or "0"), 0.0);
-                if remaining_qty > 0.0 and norm_name(item.name) == ingredient_name and norm_unit(item.unit) == ingredient_unit {
-                    used_qty = remaining_qty;
-                    if used_qty > item_qty {
-                        used_qty = item_qty;
+                updated_pantry: list = [];
+                idx = 0;
+                used_any = false;
+                for item in next_pantry {
+                    if idx == best_idx {
+                        item_qty = to_num(String(item.quantity or "0"), 0.0);
+                        used_qty = best_needed_qty;
+                        if used_qty > item_qty {
+                            used_qty = item_qty;
+                        }
+                        consumed_recipe_qty = convert_quantity(used_qty, item.unit, ingredient_unit);
+                        remaining_item_qty = item_qty - used_qty;
+                        if consumed_recipe_qty > 0.0 {
+                            remaining_qty = remaining_qty - consumed_recipe_qty;
+                            used_any = true;
+                        }
+                        if remaining_item_qty > 0.0001 and item_qty > 0.0 {
+                            remaining_package_qty = to_num(String(item.package_quantity or "0"), 0.0);
+                            if remaining_package_qty > 0.0 {
+                                remaining_package_qty = remaining_package_qty * (remaining_item_qty / item_qty);
+                            }
+                            updated_pantry = updated_pantry.concat([{
+                                "name": item.name,
+                                "quantity": round_two(remaining_item_qty),
+                                "unit": norm_unit(item.unit),
+                                "cost": round_two(to_num(String(item.cost or "0"), 0.0)),
+                                "protein": round_two(to_num(String(item.protein or "0"), 0.0)),
+                                "carb": round_two(to_num(String(item.carb or "0"), 0.0)),
+                                "fat": round_two(to_num(String(item.fat or "0"), 0.0)),
+                                "serving_size": String(item.serving_size or "").trim(),
+                                "package_quantity": round_two(remaining_package_qty),
+                                "package_unit": norm_unit(item.package_unit)
+                            }]);
+                        }
+                    } else {
+                        updated_pantry = updated_pantry.concat([item]);
                     }
-                    remaining_qty = remaining_qty - used_qty;
-                    remaining_item_qty = item_qty - used_qty;
-                    if remaining_item_qty > 0.0001 and item_qty > 0.0 {
-                        keep_ratio = remaining_item_qty / item_qty;
-                        updated_pantry = updated_pantry.concat([{
-                            "name": item.name,
-                            "quantity": round_two(remaining_item_qty),
-                            "unit": norm_unit(item.unit),
-                            "cost": round_two(to_num(String(item.cost or "0"), 0.0) * keep_ratio),
-                            "protein": round_two(to_num(String(item.protein or "0"), 0.0) * keep_ratio),
-                            "carb": round_two(to_num(String(item.carb or "0"), 0.0) * keep_ratio),
-                            "fat": round_two(to_num(String(item.fat or "0"), 0.0) * keep_ratio)
-                        }]);
-                    }
-                } else {
-                    updated_pantry = updated_pantry.concat([item]);
+                    idx = idx + 1;
+                }
+                next_pantry = updated_pantry;
+                if not used_any {
+                    break;
                 }
             }
-
-            next_pantry = updated_pantry;
         }
 
         return next_pantry;
@@ -802,6 +1167,110 @@ def:pub RecipesTab(
         return val;
     }
 
+    async def complete_recipe_and_update_pantry(recipe: dict, clear_generated_after: bool = false) -> bool {
+        recipe_id = recipe_lookup_key(recipe);
+        recipe_ingredients = clone_recipe_ingredients(recipe.ingredients);
+        if recipe_id == "" {
+            status_text = "Recipe is missing an id.";
+            return false;
+        }
+        if recipe_ingredients.length == 0 {
+            status_text = "This recipe does not have ingredient data to remove from pantry.";
+            return false;
+        }
+
+        loading = true;
+        status_text = ("Updating pantry for this saved recipe..." if recipe.made else "Removing used ingredients and saving recipe progress...");
+        previous_pantry = pantry_items_ref().slice();
+        next_pantry = next_pantry_after_recipe(recipe_ingredients);
+        pantry_match_note = "";
+        made_at_ms = now_ms();
+
+        try {
+            try {
+                subtract_result = root spawn ComputePantryAfterRecipe(
+                    pantry_items=pantry_items_ref(),
+                    recipe_ingredients=recipe_ingredients
+                );
+                subtract_out = first_report_payload(subtract_result);
+                if subtract_out and subtract_out.ok and is_listish(subtract_out.updated_pantry) {
+                    next_pantry = subtract_out.updated_pantry;
+                    pantry_match_note = String(subtract_out.notes or "");
+                } elif subtract_out and subtract_out.error {
+                    pantry_match_note = "Used direct pantry subtraction fallback: " + String(subtract_out.error);
+                }
+            } except Exception as subtract_e {
+                pantry_match_note = "Used direct pantry subtraction fallback: " + subtract_e.toString();
+            }
+
+            await set_pantry_items(next_pantry);
+            result = root spawn MarkRecipeMade(
+                recipe_id=recipe_id,
+                made=True,
+                made_at_ms=made_at_ms
+            );
+            out = first_report_payload(result);
+            if not out or out.updated == false {
+                await set_pantry_items(previous_pantry);
+                err_text = String((out.error if out else "Recipe update failed."));
+                status_text = "Could not mark recipe as made: " + err_text;
+                maybe_trigger_auth_error(err_text);
+                loading = false;
+                return false;
+            }
+
+            await load_recipe_history_api(True);
+            updated_recipe = recipe_by_id(recipe_id);
+            if not updated_recipe or Object.keys(updated_recipe).length == 0 {
+                updated_recipe = clone_recipe(recipe);
+            } else {
+                updated_recipe = clone_recipe(updated_recipe);
+            }
+            updated_recipe.made = true;
+            updated_recipe.made_at_ms = made_at_ms;
+            if clone_recipe_instructions(updated_recipe.instructions).length == 0 {
+                updated_recipe.instructions = clone_recipe_instructions(recipe.instructions);
+            }
+            if clone_recipe_ingredients(updated_recipe.ingredients).length == 0 {
+                updated_recipe.ingredients = recipe_ingredients;
+            }
+            replace_recipe_in_list(updated_recipe);
+
+            if out and out.cleared_generated and String(generated_recipe.recipe_id or "") == recipe_id {
+                generated_recipe = {};
+                show_made_confirm = false;
+            } elif String(generated_recipe.recipe_id or "") == recipe_id {
+                generated_recipe.made = true;
+                generated_recipe.made_at_ms = made_at_ms;
+            }
+            if clear_generated_after and String(generated_recipe.recipe_id or "") == recipe_id {
+                generated_recipe = {};
+                show_made_confirm = false;
+            }
+
+            pending_rate_recipe_id = recipe_id;
+            expanded_recipe_id = recipe_id;
+            filter_mode = "history";
+            status_text = (
+                "Recipe made again, pantry updated, and rating prompt is ready below."
+                if recipe.made
+                else "Recipe added to Past Recipes, pantry updated, and rating prompt is ready below."
+            );
+            if pantry_match_note.trim().length > 0 {
+                status_text = [status_text, " ", pantry_match_note].join("");
+            }
+            loading = false;
+            return true;
+        } except Exception as e {
+            await set_pantry_items(previous_pantry);
+            err_text = e.toString();
+            status_text = "Could not mark recipe as made: " + err_text;
+            maybe_trigger_auth_error(err_text);
+        }
+        loading = false;
+        return false;
+    }
+
     async def mark_generated_recipe_made() -> None {
         recipe_id = String(generated_recipe.recipe_id or "");
         if recipe_id == "" {
@@ -818,81 +1287,17 @@ def:pub RecipesTab(
             show_made_confirm = false;
             pending_rate_recipe_id = recipe_id;
             filter_mode = "history";
-            status_text = "Recipe is already in Past Recipes. Rate or rerank it below.";
+            status_text = "Recipe is already in Past Recipes. Use the saved recipe card below to make it again.";
             return;
         }
 
         show_made_confirm = false;
-        loading = true;
-        status_text = "Removing used ingredients and saving to Past Recipes...";
-        previous_pantry = pantry_items_ref().slice();
-        next_pantry = next_pantry_after_recipe(generated_recipe.ingredients);
-        pantry_match_note = "";
-        made_at_ms = now_ms();
-
-        try {
-            try {
-                subtract_result = root spawn ComputePantryAfterRecipe(
-                    pantry_items=pantry_items_ref(),
-                    recipe_ingredients=generated_recipe.ingredients
-                );
-                subtract_out = first_report_payload(subtract_result);
-                if subtract_out and subtract_out.ok and is_listish(subtract_out.updated_pantry) {
-                    next_pantry = subtract_out.updated_pantry;
-                    pantry_match_note = String(subtract_out.notes or "");
-                } elif subtract_out and subtract_out.error {
-                    pantry_match_note = "Used direct pantry subtraction fallback: " + String(subtract_out.error);
-                }
-            } except Exception as subtract_e {
-                pantry_match_note = "Used direct pantry subtraction fallback: " + subtract_e.toString();
-            }
-            await set_pantry_items(next_pantry);
-            result = root spawn MarkRecipeMade(
-                recipe_id=recipe_id,
-                made=True,
-                made_at_ms=made_at_ms
-            );
-            out = first_report_payload(result);
-            if not out or out.updated == false {
-                await set_pantry_items(previous_pantry);
-                err_text = String((out.error if out else "Recipe update failed."));
-                status_text = "Could not mark recipe as made: " + err_text;
-                maybe_trigger_auth_error(err_text);
-                loading = false;
-                return;
-            }
-
-            await load_recipe_history_api(True);
-            updated_recipe = recipe_by_id(recipe_id);
-            if updated_recipe and Object.keys(updated_recipe).length > 0 {
-                updated_recipe = clone_recipe(updated_recipe);
-                updated_recipe.made = true;
-                updated_recipe.made_at_ms = made_at_ms;
-                replace_recipe_in_list(updated_recipe);
-            } else {
-                replace_recipe_in_list(
-                    history_entry_from_generated_recipe(recipe_id, made_at_ms, true)
-                );
-            }
-            try {
-                root spawn ClearGeneratedRecipe();
-            } except Exception as _e {
-                0;
-            }
-            generated_recipe = {};
-            pending_rate_recipe_id = recipe_id;
-            filter_mode = "history";
-            status_text = "Recipe added to Past Recipes, pantry updated, and rating prompt is ready below.";
-            if pantry_match_note.trim().length > 0 {
-                status_text = [status_text, " ", pantry_match_note].join("");
-            }
-        } except Exception as e {
-            await set_pantry_items(previous_pantry);
-            err_text = e.toString();
-            status_text = "Could not mark recipe as made: " + err_text;
-            maybe_trigger_auth_error(err_text);
-        }
-        loading = false;
+        completion_recipe = (
+            clone_recipe(recipe)
+            if recipe and Object.keys(recipe).length > 0
+            else history_entry_from_generated_recipe(recipe_id)
+        );
+        await complete_recipe_and_update_pantry(completion_recipe, true);
     }
 
     async def generate_recipe_api() -> None {
@@ -913,8 +1318,8 @@ def:pub RecipesTab(
                 loading = false;
                 return;
             }
-            if not profile_out or Object.keys(profile_out).length == 0 {
-                status_text = "No saved profile found. Save profile in User Profile tab first.";
+            if not profile_has_key_info(profile_out) {
+                status_text = "Profile is missing required information. Finish it in User Profile first.";
                 loading = false;
                 return;
             }
@@ -981,6 +1386,9 @@ def:pub RecipesTab(
                 );
             } else {
                 recipes = [];
+            }
+            if expanded_recipe_id != "" and Object.keys(recipe_by_id(expanded_recipe_id)).length == 0 {
+                expanded_recipe_id = "";
             }
             clear_ranking_session();
             if not silent {
@@ -1069,8 +1477,6 @@ def:pub RecipesTab(
         }
 
         previous_recipes = recipes.slice();
-        recipes = apply_rank_updates(previous_recipes, rank_updates);
-        clear_ranking_session();
         loading = true;
         status_text = "Saving ranking placement...";
         try {
@@ -1084,6 +1490,10 @@ def:pub RecipesTab(
                 loading = false;
                 return;
             }
+            confirmed_updates = (out.updates if out and is_listish(out.updates) else rank_updates);
+            recipes = apply_rank_updates(previous_recipes, confirmed_updates);
+            await load_recipe_history_api(True);
+            clear_ranking_session();
             if pending_rate_recipe_id == recipe_id {
                 pending_rate_recipe_id = "";
             }
@@ -1106,25 +1516,31 @@ def:pub RecipesTab(
 
         candidates = tier_recipes_sorted(tier, recipe_id);
         clear_ranking_session();
+        re_rank_recipe_id = recipe_id;
         if candidates.length == 0 {
+            status_text = ["Saving ranking placement in ", tier_label(tier), "."].join("");
             await finalize_recipe_ranking(recipe_id, tier, 0);
             return;
         }
 
+        next_low = 0;
+        next_high = candidates.length - 1;
+        next_mid = Math.floor((next_low + next_high) / 2);
+        compare_recipe = rank_comparison_from(candidates, next_mid);
         active_rank_recipe_id = recipe_id;
         active_rank_tier = tier;
         active_rank_candidates = candidates;
-        active_rank_low = 0;
-        active_rank_high = candidates.length - 1;
-        active_rank_mid = Math.floor((active_rank_low + active_rank_high) / 2);
-        compare_recipe = current_rank_comparison();
+        active_rank_low = next_low;
+        active_rank_high = next_high;
+        active_rank_mid = next_mid;
         status_text = ["Compare against ", String(compare_recipe.title or "the middle recipe"), " to place this recipe in ", tier_label(tier), "."].join("");
     }
 
     async def handle_rank_tier_click(e: any) -> None {
-        recipe_id = event_attr(e, "data-recipe-id").trim();
+        recipe_id = event_attr(e, "data-recipe-key").trim();
         tier = event_attr(e, "data-tier").trim().toLowerCase();
         if recipe_id == "" or tier == "" {
+            status_text = "Recipe ranking data is missing.";
             return;
         }
         await start_recipe_ranking(recipe_id, tier);
@@ -1145,14 +1561,16 @@ def:pub RecipesTab(
         }
 
         if next_low > next_high {
+            status_text = ["Saving ranking placement in ", tier_label(active_rank_tier), "."].join("");
             await finalize_recipe_ranking(active_rank_recipe_id, active_rank_tier, next_low);
             return;
         }
 
+        next_mid = Math.floor((next_low + next_high) / 2);
+        compare_recipe = rank_comparison_from(active_rank_candidates, next_mid);
         active_rank_low = next_low;
         active_rank_high = next_high;
-        active_rank_mid = Math.floor((next_low + next_high) / 2);
-        compare_recipe = current_rank_comparison();
+        active_rank_mid = next_mid;
         status_text = ["Next comparison: ", String(compare_recipe.title or "recipe"), "."].join("");
     }
 
@@ -1205,6 +1623,44 @@ def:pub RecipesTab(
             return;
         }
         await delete_saved_recipe(recipe_id);
+    }
+
+    def toggle_saved_recipe_details(recipe_id: str) -> None {
+        if recipe_id == "" {
+            return;
+        }
+        if expanded_recipe_id == recipe_id {
+            expanded_recipe_id = "";
+        } else {
+            expanded_recipe_id = recipe_id;
+        }
+    }
+
+    async def handle_saved_recipe_title_click(e: any) -> None {
+        recipe_id = event_attr(e, "data-recipe-id").trim();
+        toggle_saved_recipe_details(recipe_id);
+    }
+
+    async def make_saved_recipe_again(recipe_id: str) -> None {
+        recipe = recipe_by_id(recipe_id);
+        if not recipe or Object.keys(recipe).length == 0 {
+            status_text = "Recipe not found.";
+            return;
+        }
+        if clone_recipe_ingredients(recipe.ingredients).length == 0 {
+            status_text = "This saved recipe does not have stored ingredient data yet.";
+            return;
+        }
+        expanded_recipe_id = recipe_id;
+        await complete_recipe_and_update_pantry(clone_recipe(recipe));
+    }
+
+    async def handle_saved_recipe_make_click(e: any) -> None {
+        recipe_id = event_attr(e, "data-recipe-id").trim();
+        if recipe_id == "" {
+            return;
+        }
+        await make_saved_recipe_again(recipe_id);
     }
 
     async def load_saved_recipe_api() -> None {
@@ -1318,25 +1774,25 @@ def:pub RecipesTab(
                         <input
                             value={pantry_cost}
                             onChange={lambda e: any -> None { pantry_cost = e.target.value; }}
-                            placeholder="cost"
+                            placeholder="cost/serv"
                             style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
                         />
                         <input
                             value={pantry_protein}
                             onChange={lambda e: any -> None { pantry_protein = e.target.value; }}
-                            placeholder="protein"
+                            placeholder="protein/serv"
                             style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
                         />
                         <input
                             value={pantry_carb}
                             onChange={lambda e: any -> None { pantry_carb = e.target.value; }}
-                            placeholder="carb"
+                            placeholder="carb/serv"
                             style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
                         />
                         <input
                             value={pantry_fat}
                             onChange={lambda e: any -> None { pantry_fat = e.target.value; }}
-                            placeholder="fat"
+                            placeholder="fat/serv"
                             style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
                         />
                         <button
@@ -1355,12 +1811,13 @@ def:pub RecipesTab(
                                 <thead>
                                     <tr style={{"background": "#eff6ff"}}>
                                         <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Name</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Qty</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Unit</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Cost</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>P</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>C</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>F</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Total Qty</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Total Unit</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Serving Size</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Cost/Serv</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>P/Serv</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>C/Serv</th>
+                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>F/Serv</th>
                                         <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Actions</th>
                                     </tr>
                                 </thead>
@@ -1369,8 +1826,9 @@ def:pub RecipesTab(
                                         lambda item: dict -> JsxElement { return
                                             <tr key={item.name} style={{"borderTop": "1px solid #e2e8f0"}}>
                                                 <td style={{"padding": "8px"}}>{item.name}</td>
-                                                <td style={{"padding": "8px"}}>{item.quantity}</td>
-                                                <td style={{"padding": "8px"}}>{item.unit}</td>
+                                                <td style={{"padding": "8px"}}>{total_quantity_value(item)}</td>
+                                                <td style={{"padding": "8px"}}>{total_quantity_unit(item)}</td>
+                                                <td style={{"padding": "8px"}}>{serving_size_display(item)}</td>
                                                 <td style={{"padding": "8px"}}>{item.cost}</td>
                                                 <td style={{"padding": "8px"}}>{item.protein}</td>
                                                 <td style={{"padding": "8px"}}>{item.carb}</td>
@@ -1416,7 +1874,7 @@ def:pub RecipesTab(
                                 lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
                             )}
                         </ol>
-                    ) if (generated_recipe and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
+                    ) if (generated_recipe and generated_recipe.instructions and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
                     {(
                         <div style={{"display": "grid", "gap": "8px", "marginTop": "10px", "padding": "10px", "borderRadius": "12px", "border": "1px solid #dbeafe", "background": "#eff6ff"}}>
                             <div style={{"fontWeight": "800"}}>Made This Recipe?</div>
@@ -1482,9 +1940,15 @@ def:pub RecipesTab(
                 ) if visible_recipes().length == 0 else (
                     visible_recipes().map(
                         lambda recipe: dict -> JsxElement { return
-                            <div key={String(recipe.recipe_id or recipe.title)} style={{"border": ("2px solid #93c5fd" if pending_rate_recipe_id == String(recipe.recipe_id or "") else "1px solid #e2e8f0"), "borderRadius": "12px", "padding": "12px", "background": ("#f8fbff" if pending_rate_recipe_id == String(recipe.recipe_id or "") else "#fcfdff"), "display": "grid", "gap": "8px"}}>
+                            <div key={recipe_lookup_key(recipe)} style={{"border": ("2px solid #93c5fd" if pending_rate_recipe_id == String(recipe.recipe_id or "") else "1px solid #e2e8f0"), "borderRadius": "12px", "padding": "12px", "background": ("#f8fbff" if pending_rate_recipe_id == String(recipe.recipe_id or "") else "#fcfdff"), "display": "grid", "gap": "8px"}}>
                                 <div style={{"display": "flex", "justifyContent": "space-between", "gap": "8px"}}>
-                                    <h3 style={{"margin": "0", "fontSize": "1.05rem"}}>{recipe.title}</h3>
+                                    <button
+                                        data-recipe-id={recipe_lookup_key(recipe)}
+                                        onClick={handle_saved_recipe_title_click}
+                                        style={{"margin": "0", "padding": "0", "border": "none", "background": "transparent", "fontSize": "1.05rem", "fontWeight": "800", "textAlign": "left", "color": "#1d4ed8", "textDecoration": "underline", "cursor": "pointer"}}
+                                    >
+                                        {recipe.title}
+                                    </button>
                                     <div style={{"display": "flex", "gap": "6px", "alignItems": "center"}}>
                                         <button data-recipe-id={String(recipe.recipe_id or "")} onClick={handle_saved_recipe_favorite_click} style={{"border": "1px solid #fbcfe8", "background": "#fdf2f8", "borderRadius": "8px", "padding": "4px 8px"}}>
                                             {("★ Favorite" if recipe.favorite else "☆ Favorite")}
@@ -1496,6 +1960,7 @@ def:pub RecipesTab(
                                 </div>
                                 <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap", "fontSize": "0.9rem", "opacity": "0.78"}}>
                                     <span>Generated: {format_saved_time(recipe)}</span>
+                                    <span>{("Hide Directions" if recipe_details_open(recipe) else "Show Directions")}</span>
                                     {(
                                         <span style={{"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #86efac", "background": "#dcfce7", "color": "#166534", "fontWeight": "800", "opacity": "1"}}>
                                             Past Recipe
@@ -1505,6 +1970,46 @@ def:pub RecipesTab(
                                         <span>Made: {format_made_time(recipe)}</span>
                                     ) if recipe.made else None}
                                 </div>
+                                {(
+                                    <div style={{"display": "grid", "gap": "10px", "padding": "12px", "border": "1px solid #bfdbfe", "borderRadius": "12px", "background": "#eff6ff"}}>
+                                        <div style={{"display": "flex", "justifyContent": "space-between", "gap": "10px", "alignItems": "center", "flexWrap": "wrap"}}>
+                                            <div style={{"fontWeight": "800"}}>Directions</div>
+                                            <button
+                                                data-recipe-id={recipe_lookup_key(recipe)}
+                                                onClick={handle_saved_recipe_make_click}
+                                                disabled={loading}
+                                                style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "800", "opacity": ("0.7" if loading else "1")}}
+                                            >
+                                                {("Make Again And Update Pantry" if recipe.made else "Make Recipe And Update Pantry")}
+                                            </button>
+                                        </div>
+                                        {(
+                                            <ol style={{"margin": "0", "paddingLeft": "20px", "display": "grid", "gap": "6px"}}>
+                                                {recipe.instructions.map(
+                                                    lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
+                                                )}
+                                            </ol>
+                                        ) if (recipe.instructions and is_listish(recipe.instructions) and recipe.instructions.length > 0) else (
+                                            <div style={{"fontSize": "0.92rem", "opacity": "0.78"}}>
+                                                No saved directions are available for this recipe yet.
+                                            </div>
+                                        )}
+                                        {(
+                                            <div style={{"display": "grid", "gap": "6px"}}>
+                                                <div style={{"fontWeight": "800"}}>Ingredients</div>
+                                                <div style={{"display": "grid", "gap": "6px"}}>
+                                                    {recipe.ingredients.map(
+                                                        lambda item: dict -> JsxElement { return
+                                                            <div key={[item.name, item.quantity, item.unit].join("-")} style={{"display": "flex", "justifyContent": "space-between", "gap": "8px", "padding": "8px 10px", "border": "1px solid #dbeafe", "borderRadius": "10px", "background": "#ffffff"}}>
+                                                                <span>{item.name}</span>
+                                                                <span>{[String(item.quantity or 0), " ", norm_unit(item.unit)].join("")}</span>
+                                                            </div>; }
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) if (recipe.ingredients and is_listish(recipe.ingredients) and recipe.ingredients.length > 0) else None}
+                                    </div>
+                                ) if recipe_details_open(recipe) else None}
                                 {(
                                     <div style={{"padding": "9px 10px", "borderRadius": "10px", "border": "1px solid #bfdbfe", "background": "#eff6ff", "fontWeight": "700"}}>
                                         You made this recipe. Choose a tier now to rate it.
@@ -1520,35 +2025,48 @@ def:pub RecipesTab(
                                     ) if rating_order_value(recipe) >= 0 else None}
                                 </div>
                                 <div style={{"display": "grid", "gap": "8px", "padding": "10px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#f8fafc"}}>
-                                    <div style={{"fontWeight": "800"}}>
-                                        {("Re-rank This Recipe" if recipe_tier(recipe) != "" else "Rank This Recipe")}
+                                    <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "8px", "flexWrap": "wrap"}}>
+                                        <div style={{"fontWeight": "800"}}>
+                                            {("Rate This Recipe" if recipe_tier(recipe) == "" else "Recipe Ranked")}
+                                        </div>
+                                        {(
+                                            <button onClick={lambda -> None { re_rank_recipe_id = recipe_lookup_key(recipe); }} style={{"padding": "7px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff", "fontWeight": "700"}}>
+                                                Change Ranking
+                                            </button>
+                                        ) if recipe_tier(recipe) != "" and not show_rank_controls(recipe) else None}
                                     </div>
-                                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
-                                        <button
-                                            data-recipe-id={String(recipe.recipe_id or "")}
-                                            data-tier="very_good"
-                                            onClick={handle_rank_tier_click}
-                                            style={tier_button_style("very_good", active_rank_recipe_id == String(recipe.recipe_id or "") and active_rank_tier == "very_good")}
-                                        >
-                                            Very Good
-                                        </button>
-                                        <button
-                                            data-recipe-id={String(recipe.recipe_id or "")}
-                                            data-tier="average"
-                                            onClick={handle_rank_tier_click}
-                                            style={tier_button_style("average", active_rank_recipe_id == String(recipe.recipe_id or "") and active_rank_tier == "average")}
-                                        >
-                                            Average
-                                        </button>
-                                        <button
-                                            data-recipe-id={String(recipe.recipe_id or "")}
-                                            data-tier="not_great"
-                                            onClick={handle_rank_tier_click}
-                                            style={tier_button_style("not_great", active_rank_recipe_id == String(recipe.recipe_id or "") and active_rank_tier == "not_great")}
-                                        >
-                                            Not Great
-                                        </button>
-                                    </div>
+                                    {(
+                                        <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
+                                            <button
+                                                data-recipe-key={recipe_lookup_key(recipe)}
+                                                data-tier="very_good"
+                                                onClick={handle_rank_tier_click}
+                                                style={tier_button_style("very_good", active_rank_recipe_id == recipe_lookup_key(recipe) and active_rank_tier == "very_good")}
+                                            >
+                                                Very Good
+                                            </button>
+                                            <button
+                                                data-recipe-key={recipe_lookup_key(recipe)}
+                                                data-tier="average"
+                                                onClick={handle_rank_tier_click}
+                                                style={tier_button_style("average", active_rank_recipe_id == recipe_lookup_key(recipe) and active_rank_tier == "average")}
+                                            >
+                                                Average
+                                            </button>
+                                            <button
+                                                data-recipe-key={recipe_lookup_key(recipe)}
+                                                data-tier="not_great"
+                                                onClick={handle_rank_tier_click}
+                                                style={tier_button_style("not_great", active_rank_recipe_id == recipe_lookup_key(recipe) and active_rank_tier == "not_great")}
+                                            >
+                                                Not Great
+                                            </button>
+                                        </div>
+                                    ) if show_rank_controls(recipe) else (
+                                        <div style={{"fontSize": "0.9rem", "opacity": "0.78"}}>
+                                            Ranking saved. The score badge above is the current placement for this recipe.
+                                        </div>
+                                    )}
                                     {(
                                         <div style={{"display": "grid", "gap": "8px", "padding": "10px", "borderRadius": "10px", "border": "1px solid #bfdbfe", "background": "#eff6ff"}}>
                                             <div style={{"fontWeight": "800"}}>Binary Placement: {tier_label(active_rank_tier)}</div>
@@ -1580,7 +2098,7 @@ def:pub RecipesTab(
                                                 </button>
                                             </div>
                                         </div>
-                                    ) if active_rank_recipe_id == String(recipe.recipe_id or "") else None}
+                                    ) if active_rank_recipe_id == recipe_lookup_key(recipe) else None}
                                 </div>
                                 <div style={{"fontSize": "0.9rem"}}><b>Notes:</b> {recipe.notes}</div>
                             </div>; }

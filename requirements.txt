@@ -9,24 +9,26 @@
 # - These pins match the working repo/venv versions currently used by this project.
 # - `paddlepaddle` is the CPU package from PyPI, which is the simplest path for
 #   this repo on macOS and Windows.
-# - `jaclang` stays on 0.10.0 to match `jac.toml`.
 
 # Jac / Jaseci runtime
 jaseci==2.2.14
-jaclang==0.10.0
+jaclang==0.13.3
 jac-client==0.2.16
 jac-scale==0.1.7
 jac-super==0.1.1
 
 # Environment + LLM integration
 python-dotenv==1.2.1
-byllm==0.4.18
+byllm==0.6.1
 litellm==1.79.3
+httpx==0.28.1
+PyJWT==2.10.1
+fastapi-sso==0.20.0
 
 # OCR / image pipeline
 numpy==2.1.3
 opencv-python-headless==4.10.0.84
-Pillow==10.4.0
+Pillow==12.1.1
 paddlepaddle==3.3.0
 paddleocr==3.4.0
 paddlex==3.4.2

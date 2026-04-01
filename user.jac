@@ -128,33 +128,64 @@ node UserProfile {
 # Upsert a single persistent user profile node in graph storage.
 walker SaveUserProfile {
     has profile: dict;
+    has profile_nodes: list = [];
 
     can save with Root entry {
         try {
-            profile_obj = user_from_dict(self.profile);
-            # Keep only one user profile in the graph.
             visit [-->];
-            here ++> UserProfile(
-                age=profile_obj.age,
-                sex=profile_obj.sex,
-                height=profile_obj.height,
-                weight=profile_obj.weight,
-                dietary_restrictions=profile_obj.dietary_restrictions,
-                allergies=profile_obj.allergies,
-                fitness_level=profile_obj.fitness_level,
-                goal=profile_obj.goal,
-                goal_weight=profile_obj.goal_weight,
-                username=profile_obj.username
-            );
-            report {"saved": True};
         } except Exception as e {
             report {"saved": False, "error": str(e)};
         }
     }
 
-    can clear_old with UserProfile entry {
-        # Guarantee one active profile so downstream macro/recipe calls are deterministic.
-        del here;
+    can collect_existing with UserProfile entry {
+        self.profile_nodes.append(here);
+    }
+
+    can finish with Root exit {
+        try {
+            profile_obj = user_from_dict(self.profile);
+            if len(self.profile_nodes) > 0 {
+                primary = self.profile_nodes[0];
+                primary.age = profile_obj.age;
+                primary.sex = profile_obj.sex;
+                primary.height = profile_obj.height;
+                primary.weight = profile_obj.weight;
+                primary.dietary_restrictions = profile_obj.dietary_restrictions;
+                primary.allergies = profile_obj.allergies;
+                primary.fitness_level = profile_obj.fitness_level;
+                primary.goal = profile_obj.goal;
+                primary.goal_weight = profile_obj.goal_weight;
+                primary.username = profile_obj.username;
+
+                idx = 0;
+                for profile_node in self.profile_nodes {
+                    if idx > 0 {
+                        del profile_node;
+                    }
+                    idx += 1;
+                }
+                save(primary);
+            } else {
+                new_nodes = here ++> UserProfile(
+                    age=profile_obj.age,
+                    sex=profile_obj.sex,
+                    height=profile_obj.height,
+                    weight=profile_obj.weight,
+                    dietary_restrictions=profile_obj.dietary_restrictions,
+                    allergies=profile_obj.allergies,
+                    fitness_level=profile_obj.fitness_level,
+                    goal=profile_obj.goal,
+                    goal_weight=profile_obj.goal_weight,
+                    username=profile_obj.username
+                );
+                save(new_nodes[0]);
+            }
+            commit();
+            report {"saved": True};
+        } except Exception as e {
+            report {"saved": False, "error": str(e)};
+        }
     }
 }
 
@@ -258,6 +289,7 @@ walker GenerateUserMacroNeeds {
 
 # Persisted per-user pantry state.
 node PantryState {
+    has version: int = 0;
     has items: list = [];
 }
 
@@ -269,6 +301,11 @@ node NutritionState {
 
 walker SavePantryState {
     has items: list;
+    has version: int = 0;
+    has pantry_nodes: list = [];
+    has current_version: int = -1;
+    has current_count: int = 0;
+    has found_current: bool = False;
     has save_error: str = "";
 
     can save with Root entry {
@@ -279,8 +316,13 @@ walker SavePantryState {
         }
     }
 
-    can clear_old with PantryState entry {
-        del here;
+    can collect_existing with PantryState entry {
+        self.pantry_nodes.append(here);
+        if here.version >= self.current_version {
+            self.current_version = here.version;
+            self.current_count = len(here.items);
+            self.found_current = True;
+        }
     }
 
     can finish with Root exit {
@@ -288,9 +330,44 @@ walker SavePantryState {
             report {"saved": False, "error": self.save_error};
             return;
         }
+        if self.version < self.current_version {
+            report {
+                "saved": False,
+                "stale": True,
+                "count": self.current_count,
+                "version": self.current_version
+            };
+            return;
+        }
+        if self.found_current and self.version == self.current_version {
+            report {
+                "saved": True,
+                "duplicate": True,
+                "count": self.current_count,
+                "version": self.current_version
+            };
+            return;
+        }
         try {
-            here ++> PantryState(items=self.items);
-            report {"saved": True, "count": len(self.items)};
+            if len(self.pantry_nodes) > 0 {
+                primary = self.pantry_nodes[0];
+                primary.items = self.items;
+                primary.version = self.version;
+
+                idx = 0;
+                for pantry_node in self.pantry_nodes {
+                    if idx > 0 {
+                        del pantry_node;
+                    }
+                    idx += 1;
+                }
+                save(primary);
+            } else {
+                new_nodes = here ++> PantryState(items=self.items, version=self.version);
+                save(new_nodes[0]);
+            }
+            commit();
+            report {"saved": True, "count": len(self.items), "version": self.version};
         } except Exception as e {
             report {"saved": False, "error": str(e)};
         }
@@ -299,17 +376,21 @@ walker SavePantryState {
 
 walker GetPantryState {
     has items: list = [];
+    has version: int = 0;
 
     can collect with Root entry {
         visit [-->];
     }
 
     can read with PantryState entry {
-        self.items = here.items;
+        if here.version >= self.version {
+            self.items = here.items;
+            self.version = here.version;
+        }
     }
 
     can done with Root exit {
-        report {"items": self.items};
+        report {"items": self.items, "version": self.version};
     }
 }
 
@@ -330,6 +411,7 @@ walker ClearPantryState {
 walker SaveNutritionState {
     has selected_day_index: int;
     has weekly_history: list;
+    has nutrition_nodes: list = [];
     has save_error: str = "";
 
     can save with Root entry {
@@ -340,8 +422,8 @@ walker SaveNutritionState {
         }
     }
 
-    can clear_old with NutritionState entry {
-        del here;
+    can collect_existing with NutritionState entry {
+        self.nutrition_nodes.append(here);
     }
 
     can finish with Root exit {
@@ -350,10 +432,27 @@ walker SaveNutritionState {
             return;
         }
         try {
-            here ++> NutritionState(
-                selected_day_index=self.selected_day_index,
-                weekly_history=self.weekly_history
-            );
+            if len(self.nutrition_nodes) > 0 {
+                primary = self.nutrition_nodes[0];
+                primary.selected_day_index = self.selected_day_index;
+                primary.weekly_history = self.weekly_history;
+
+                idx = 0;
+                for nutrition_node in self.nutrition_nodes {
+                    if idx > 0 {
+                        del nutrition_node;
+                    }
+                    idx += 1;
+                }
+                save(primary);
+            } else {
+                new_nodes = here ++> NutritionState(
+                    selected_day_index=self.selected_day_index,
+                    weekly_history=self.weekly_history
+                );
+                save(new_nodes[0]);
+            }
+            commit();
             report {"saved": True};
         } except Exception as e {
             report {"saved": False, "error": str(e)};

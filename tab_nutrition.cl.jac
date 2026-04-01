@@ -15,7 +15,7 @@ def:pub NutritionTab(
     ];
 
     def is_listish(raw: any) -> bool {
-        if raw == None {
+        if not raw {
             return false;
         }
         if Array.isArray(raw) {

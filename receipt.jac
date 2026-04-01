@@ -11,6 +11,10 @@ glob _ocr_engine_cache: dict = {};
 glob _module_cache: dict = {};
 glob _ocr_result_cache: dict = {};
 
+with entry {
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True");
+}
+
 def _get_module(name: str) -> object {
     if name in _module_cache {
         return _module_cache[name];

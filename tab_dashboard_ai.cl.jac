@@ -27,6 +27,9 @@ def:pub DashboardAiTab(on_auth_error: any = None) -> JsxElement {
     ];
 
     def first_report_payload(raw_result: dict) -> dict {
+        if not raw_result {
+            return {};
+        }
         if raw_result.reports and raw_result.reports.length > 0 {
             return raw_result.reports[0];
         }
@@ -40,6 +43,57 @@ def:pub DashboardAiTab(on_auth_error: any = None) -> JsxElement {
             return raw_result.result;
         }
         return raw_result;
+    }
+
+    def parse_profile_num(raw: any, fallback: float = -1.0) -> float {
+        parsed = parseFloat(String(raw or "").trim());
+        if isNaN(parsed) {
+            return fallback;
+        }
+        return parsed;
+    }
+
+    def normalized_profile_choice(raw: any) -> str {
+        return String(raw or "").trim().toUpperCase();
+    }
+
+    def profile_has_key_info(profile: dict = {}) -> bool {
+        if not profile {
+            return false;
+        }
+
+        age_num = parseInt(String(profile.age or "").trim());
+        height_num = parse_profile_num(profile.height, -1.0);
+        weight_num = parse_profile_num(profile.weight, -1.0);
+        sex_val = normalized_profile_choice(profile.sex);
+        fitness_val = normalized_profile_choice(profile.fitness_level);
+        goal_val = normalized_profile_choice(profile.goal);
+
+        if isNaN(age_num) or age_num <= 0 or height_num <= 0 or weight_num <= 0 {
+            return false;
+        }
+        if not (sex_val == "MALE" or sex_val == "FEMALE" or sex_val == "OTHER" or sex_val == "PREFER_NOT_TO_SAY") {
+            return false;
+        }
+        if not (
+            fitness_val == "SEDENTARY" or
+            fitness_val == "LIGHTLY_ACTIVE" or
+            fitness_val == "MODERATELY_ACTIVE" or
+            fitness_val == "VERY_ACTIVE" or
+            fitness_val == "ATHLETE"
+        ) {
+            return false;
+        }
+        if not (
+            goal_val == "FAT_LOSS" or
+            goal_val == "MAINTENANCE" or
+            goal_val == "LEAN_BULK" or
+            goal_val == "MUSCLE_GAIN" or
+            goal_val == "ENDURANCE_PERFORMANCE"
+        ) {
+            return false;
+        }
+        return true;
     }
 
     def is_auth_error_text(text: str) -> bool {
@@ -165,8 +219,8 @@ def:pub DashboardAiTab(on_auth_error: any = None) -> JsxElement {
                 loading = false;
                 return;
             }
-            if not profile_out or Object.keys(profile_out).length == 0 {
-                status_text = "No saved user profile found. Save one in User Profile tab first.";
+            if not profile_has_key_info(profile_out) {
+                status_text = "Profile is missing required information. Finish it in User Profile first.";
                 loading = false;
                 return;
             }

@@ -26,7 +26,7 @@ def:pub UserProfileTab(
     has saved_profile: dict = {};
 
     def is_listish(raw: any) -> bool {
-        if raw == None {
+        if not raw {
             return false;
         }
         if Array.isArray(raw) {
@@ -63,7 +63,70 @@ def:pub UserProfileTab(
         return parsed;
     }
 
+    def normalized_profile_choice(raw: any) -> str {
+        return String(raw or "").trim().toUpperCase();
+    }
+
+    def profile_has_any_data(profile: dict = {}) -> bool {
+        if not profile {
+            return false;
+        }
+        return (
+            String(profile.username or "").trim().length > 0 or
+            String(profile.age or "").trim().length > 0 or
+            String(profile.sex or "").trim().length > 0 or
+            String(profile.height or "").trim().length > 0 or
+            String(profile.weight or "").trim().length > 0 or
+            String(profile.goal or "").trim().length > 0 or
+            String(profile.fitness_level or "").trim().length > 0 or
+            (is_listish(profile.dietary_restrictions) and profile.dietary_restrictions.length > 0) or
+            (is_listish(profile.allergies) and profile.allergies.length > 0)
+        );
+    }
+
+    def profile_has_key_info(profile: dict = {}) -> bool {
+        if not profile_has_any_data(profile) {
+            return false;
+        }
+
+        age_num = parseInt(String(profile.age or "").trim());
+        height_num = parse_num(String(profile.height or ""), -1.0);
+        weight_num = parse_num(String(profile.weight or ""), -1.0);
+        sex_val = normalized_profile_choice(profile.sex);
+        fitness_val = normalized_profile_choice(profile.fitness_level);
+        goal_val = normalized_profile_choice(profile.goal);
+
+        if isNaN(age_num) or age_num <= 0 or height_num <= 0 or weight_num <= 0 {
+            return false;
+        }
+        if not (sex_val == "MALE" or sex_val == "FEMALE" or sex_val == "OTHER" or sex_val == "PREFER_NOT_TO_SAY") {
+            return false;
+        }
+        if not (
+            fitness_val == "SEDENTARY" or
+            fitness_val == "LIGHTLY_ACTIVE" or
+            fitness_val == "MODERATELY_ACTIVE" or
+            fitness_val == "VERY_ACTIVE" or
+            fitness_val == "ATHLETE"
+        ) {
+            return false;
+        }
+        if not (
+            goal_val == "FAT_LOSS" or
+            goal_val == "MAINTENANCE" or
+            goal_val == "LEAN_BULK" or
+            goal_val == "MUSCLE_GAIN" or
+            goal_val == "ENDURANCE_PERFORMANCE"
+        ) {
+            return false;
+        }
+        return true;
+    }
+
     def first_report_payload(raw_result: dict) -> dict {
+        if not raw_result {
+            return {};
+        }
         if raw_result.reports and raw_result.reports.length > 0 {
             return raw_result.reports[0];
         }
@@ -94,6 +157,33 @@ def:pub UserProfileTab(
         if on_auth_error and is_auth_error_text(text) {
             on_auth_error("Session expired. Please sign in again.");
         }
+    }
+
+    async def post_authenticated_walker(walker_name: str, payload: dict = {}) -> dict {
+        jac_token = localStorage.getItem("jac_token") or "";
+        response = await fetch(
+            "/walker/".concat(walker_name),
+            {
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Authorization": ("Bearer " + jac_token) if jac_token else ""
+                },
+                "credentials": "include",
+                "body": JSON.stringify(payload)
+            }
+        );
+        raw_text = await response.text();
+        response_payload = {};
+        try {
+            response_payload = JSON.parse(raw_text);
+        } except Exception as _e {
+            response_payload = {"error": raw_text};
+        }
+        if not response.ok {
+            return {"error": error_message(response_payload, raw_text)};
+        }
+        return first_report_payload(response_payload);
     }
 
     def profile_cache_key() -> str {
@@ -231,8 +321,7 @@ def:pub UserProfileTab(
         loading = true;
         status_text = "Saving profile...";
         try {
-            result = root spawn SaveUserProfile(profile=payload);
-            out = first_report_payload(result);
+            out = await post_authenticated_walker("SaveUserProfile", {"profile": payload});
             if out.saved {
                 save_profile_cache(payload);
                 apply_profile_to_form(payload);
@@ -242,14 +331,26 @@ def:pub UserProfileTab(
                     on_profile_change(payload);
                 }
             } else {
+                save_profile_cache(payload);
+                apply_profile_to_form(payload);
+                is_editing = false;
                 err_text = String(out.error or JSON.stringify(out, None, 2));
-                status_text = "Save failed: " + err_text;
+                status_text = "Profile saved locally. Backend sync failed: " + err_text;
                 maybe_trigger_auth_error(err_text);
+                if on_profile_change {
+                    on_profile_change(payload);
+                }
             }
         } except Exception as e {
+            save_profile_cache(payload);
+            apply_profile_to_form(payload);
+            is_editing = false;
             err_text = e.toString();
-            status_text = "Save failed: " + err_text;
+            status_text = "Profile saved locally. Backend sync failed: " + err_text;
             maybe_trigger_auth_error(err_text);
+            if on_profile_change {
+                on_profile_change(payload);
+            }
         }
         loading = false;
     }
@@ -258,8 +359,7 @@ def:pub UserProfileTab(
         loading = true;
         status_text = "Loading profile...";
         try {
-            result = root spawn GetUserProfile();
-            out = first_report_payload(result);
+            out = await post_authenticated_walker("GetUserProfile");
             if out and out.error {
                 err_text = String(out.error);
                 status_text = "Load failed: " + err_text;
@@ -267,11 +367,15 @@ def:pub UserProfileTab(
                 loading = false;
                 return;
             }
-            if not out or Object.keys(out).length == 0 {
+            if not profile_has_any_data(out) {
                 cached = load_profile_cache();
-                if cached and Object.keys(cached).length > 0 {
+                if profile_has_any_data(cached) {
                     out = cached;
-                    status_text = "Profile loaded from local cache.";
+                    if profile_has_key_info(cached) {
+                        status_text = "Profile loaded from local cache.";
+                    } else {
+                        status_text = "Profile is missing required fields. Complete the survey below.";
+                    }
                 } else {
                     saved_profile = {};
                     reset_form();
@@ -281,21 +385,29 @@ def:pub UserProfileTab(
                     return;
                 }
             } else {
-                status_text = "Profile loaded from backend.";
+                if profile_has_key_info(out) {
+                    status_text = "Profile loaded from backend.";
+                } else {
+                    status_text = "Profile is missing required fields. Complete the survey below.";
+                }
             }
 
             save_profile_cache(out);
             apply_profile_to_form(out);
-            is_editing = false;
+            is_editing = not profile_has_key_info(out);
             if on_profile_change {
                 on_profile_change(out);
             }
         } except Exception as e {
             cached = load_profile_cache();
-            if cached and Object.keys(cached).length > 0 {
+            if profile_has_any_data(cached) {
                 apply_profile_to_form(cached);
-                is_editing = false;
-                status_text = "Profile loaded from local cache.";
+                is_editing = not profile_has_key_info(cached);
+                if profile_has_key_info(cached) {
+                    status_text = "Profile loaded from local cache.";
+                } else {
+                    status_text = "Profile is missing required fields. Complete the survey below.";
+                }
                 if on_profile_change {
                     on_profile_change(cached);
                 }
@@ -313,7 +425,7 @@ def:pub UserProfileTab(
     }
 
     def start_editing() -> None {
-        if saved_profile and Object.keys(saved_profile).length > 0 {
+        if profile_has_any_data(saved_profile) {
             apply_profile_to_form(saved_profile);
         }
         is_editing = true;
@@ -321,10 +433,16 @@ def:pub UserProfileTab(
     }
 
     def cancel_edit() -> None {
-        if saved_profile and Object.keys(saved_profile).length > 0 {
+        if profile_has_key_info(saved_profile) {
             apply_profile_to_form(saved_profile);
             is_editing = false;
             status_text = "Viewing saved profile.";
+            return;
+        }
+        if profile_has_any_data(saved_profile) {
+            apply_profile_to_form(saved_profile);
+            is_editing = true;
+            status_text = "Profile is missing required fields. Complete the survey below.";
             return;
         }
         reset_form();
@@ -416,7 +534,7 @@ def:pub UserProfileTab(
                         </div>
                     </div>
                 </div>
-            ) if (saved_profile and Object.keys(saved_profile).length > 0 and not is_editing) else (
+            ) if (profile_has_key_info(saved_profile) and not is_editing) else (
                 <div style={{"display": "grid", "gap": "12px"}}>
                     <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))", "gap": "12px"}}>
                         <div style={{"border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>

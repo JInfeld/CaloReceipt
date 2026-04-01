@@ -113,6 +113,9 @@ def:pub ReceiptUploadTab(
     }
 
     def first_report_payload(raw_result: dict) -> dict {
+        if not raw_result {
+            return {};
+        }
         if raw_result.reports and raw_result.reports.length > 0 {
             return raw_result.reports[0];
         }
@@ -146,7 +149,7 @@ def:pub ReceiptUploadTab(
     }
 
     def is_listish(raw: any) -> bool {
-        if raw == None {
+        if not raw {
             return false;
         }
         if Array.isArray(raw) {
@@ -169,6 +172,9 @@ def:pub ReceiptUploadTab(
 
     def normalize_unit(raw: str) -> str {
         text = String(raw).trim().toUpperCase();
+        if text == "LOAF" {
+            return "LOAF";
+        }
         if text == "LB" {
             return "LB";
         }
@@ -193,6 +199,42 @@ def:pub ReceiptUploadTab(
         return "PIECE";
     }
 
+    def serving_size_display(item: any) -> str {
+        serving_text = String(item.serving_size or "").trim();
+        if serving_text.length > 0 {
+            return serving_text;
+        }
+        unit_text = normalize_unit(String(item.unit or "PIECE"));
+        if unit_text == "PIECE" {
+            return "1 piece";
+        }
+        if unit_text == "LOAF" {
+            return "1 loaf";
+        }
+        if unit_text == "TBSP" {
+            return "1 tbsp";
+        }
+        if unit_text == "TSP" {
+            return "1 tsp";
+        }
+        if unit_text == "CUP" {
+            return "1 cup";
+        }
+        if unit_text == "CLOVE" {
+            return "1 clove";
+        }
+        if unit_text == "BUNCH" {
+            return "1 bunch";
+        }
+        if unit_text == "OZ" {
+            return "1 oz";
+        }
+        if unit_text == "LB" {
+            return "1 lb";
+        }
+        return "";
+    }
+
     def norm_name(raw: any) -> str {
         return String(raw or "").trim().toLowerCase().split(" ").filter(
             lambda part: str -> bool { return part.trim().length > 0; }
@@ -215,6 +257,34 @@ def:pub ReceiptUploadTab(
         return parsed;
     }
 
+    def total_quantity_value(raw_qty: any, fallback_qty: any = 0.0) -> float {
+        qty_value = num_or_zero(raw_qty);
+        if qty_value > 0.0 {
+            return qty_value;
+        }
+        return num_or_zero(fallback_qty);
+    }
+
+    def total_quantity_display(item: any) -> str {
+        display_qty = total_quantity_value(item.package_quantity, item.quantity);
+        display_unit = normalize_unit(String(item.package_unit or item.unit or "PIECE"));
+        if display_qty <= 0.0 {
+            display_qty = 1.0;
+        }
+        return [String(display_qty), " ", display_unit].join("");
+    }
+
+    def per_serving_merge_value(left_value: any, left_qty: float, right_value: any, right_qty: float) -> float {
+        total_qty = left_qty + right_qty;
+        if total_qty <= 0.0 {
+            return 0.0;
+        }
+        return (
+            (num_or_zero(left_value) * left_qty) +
+            (num_or_zero(right_value) * right_qty)
+        ) / total_qty;
+    }
+
     def receipt_row_payload(
         row_id: int,
         name: str,
@@ -223,7 +293,10 @@ def:pub ReceiptUploadTab(
         cost: any = 0.0,
         protein: any = 0.0,
         carb: any = 0.0,
-        fat: any = 0.0
+        fat: any = 0.0,
+        serving_size: any = "",
+        storage_quantity: any = 0.0,
+        storage_unit: any = "PIECE"
     ) -> dict {
         return {
             "row_id": row_id,
@@ -233,7 +306,10 @@ def:pub ReceiptUploadTab(
             "cost": num_or_zero(cost),
             "protein": num_or_zero(protein),
             "carb": num_or_zero(carb),
-            "fat": num_or_zero(fat)
+            "fat": num_or_zero(fat),
+            "serving_size": String(serving_size or "").trim(),
+            "storage_quantity": num_or_zero(storage_quantity),
+            "storage_unit": normalize_unit(String(storage_unit or unit or "PIECE"))
         };
     }
 
@@ -276,20 +352,12 @@ def:pub ReceiptUploadTab(
     }
 
     async def post_walker_with_timeout(walker_name: str, payload: dict) -> dict {
-        headers = {"Content-Type": "application/json"};
-        try {
-            token = String(localStorage.getItem("jac_token") or "").trim();
-            if token.length > 0 {
-                headers["Authorization"] = "Bearer " + token;
-            }
-        } except Exception as _e {
-            0;
-        }
         resp = await fetch(
             "/walker/".concat(walker_name),
             {
                 "method": "POST",
-                "headers": headers,
+                "headers": {"Content-Type": "application/json"},
+                "credentials": "include",
                 "body": JSON.stringify(payload)
             }
         );
@@ -314,12 +382,15 @@ def:pub ReceiptUploadTab(
             rows = rows.concat([receipt_row_payload(
                 row_id,
                 item_name,
-                String(item.quantity or 1),
-                String(item.unit or "PIECE"),
+                String(item.package_quantity or item.quantity or 1),
+                String(item.package_unit or item.unit or "PIECE"),
                 item.cost,
                 item.protein,
                 item.carb,
-                item.fat
+                item.fat,
+                item.serving_size,
+                item.quantity,
+                item.unit
             )]);
             row_id += 1;
         }
@@ -554,7 +625,7 @@ def:pub ReceiptUploadTab(
                 ocr_last_duration_ms = elapsed_ms;
             }
             ocr_timer_display = ["Last OCR time: ", format_elapsed_label(ocr_last_duration_ms)].join("");
-            status_text = ["API parsed ", String((out.items or []).length), " items. Edit item name, quantity, and measurement."].join("");
+            status_text = ["API parsed ", String((out.items or []).length), " items. Edit item name and total quantity before adding to pantry."].join("");
             add_debug("parse:success", {"request_id": req_id, "item_count": String((out.items or []).length), "ocr_ms": ocr_last_duration_ms});
         } except Exception as e {
             err_text = e.toString();
@@ -581,7 +652,10 @@ def:pub ReceiptUploadTab(
                     row.cost,
                     row.protein,
                     row.carb,
-                    row.fat
+                    row.fat,
+                    row.serving_size,
+                    row.storage_quantity,
+                    row.storage_unit
                 )]);
             } else {
                 next_rows = next_rows.concat([row]);
@@ -594,6 +668,15 @@ def:pub ReceiptUploadTab(
         next_rows: list = [];
         for row in parsed_rows {
             if row.row_id == row_id {
+                prior_display_qty = num_or_zero(row.quantity_text);
+                next_display_qty = num_or_zero(value);
+                next_storage_qty = num_or_zero(row.storage_quantity);
+                if next_storage_qty <= 0.0 {
+                    next_storage_qty = qty_or_one(row.quantity_text);
+                }
+                if prior_display_qty > 0.0 and next_display_qty > 0.0 {
+                    next_storage_qty = next_storage_qty * (next_display_qty / prior_display_qty);
+                }
                 next_rows = next_rows.concat([receipt_row_payload(
                     row.row_id,
                     row.name,
@@ -602,7 +685,10 @@ def:pub ReceiptUploadTab(
                     row.cost,
                     row.protein,
                     row.carb,
-                    row.fat
+                    row.fat,
+                    row.serving_size,
+                    next_storage_qty,
+                    row.storage_unit
                 )]);
             } else {
                 next_rows = next_rows.concat([row]);
@@ -623,7 +709,10 @@ def:pub ReceiptUploadTab(
                     row.cost,
                     row.protein,
                     row.carb,
-                    row.fat
+                    row.fat,
+                    row.serving_size,
+                    row.storage_quantity,
+                    row.storage_unit
                 )]);
             } else {
                 next_rows = next_rows.concat([row]);
@@ -647,12 +736,23 @@ def:pub ReceiptUploadTab(
             }
             staged = staged.concat([{
                 "name": row_name,
-                "quantity": row.quantity_text.trim(),
-                "unit": normalize_unit(row.unit),
+                "quantity": (
+                    row.storage_quantity
+                    if num_or_zero(row.storage_quantity) > 0.0
+                    else qty_or_one(row.quantity_text)
+                ),
+                "unit": (
+                    normalize_unit(String(row.storage_unit or "PIECE"))
+                    if String(row.storage_unit or "").trim().length > 0
+                    else normalize_unit(row.unit)
+                ),
                 "cost": num_or_zero(row.cost),
                 "protein": num_or_zero(row.protein),
                 "carb": num_or_zero(row.carb),
-                "fat": num_or_zero(row.fat)
+                "fat": num_or_zero(row.fat),
+                "serving_size": String(row.serving_size or "").trim(),
+                "package_quantity": qty_or_one(row.quantity_text),
+                "package_unit": normalize_unit(row.unit)
             }]);
         }
 
@@ -661,24 +761,36 @@ def:pub ReceiptUploadTab(
             return;
         }
 
-        merged: list = pantry_items_ref();
+        merged: list = pantry_items_ref().slice();
         for incoming in staged {
             in_name = String(incoming.name or "").trim();
             in_unit = normalize_unit(String(incoming.unit or "PIECE"));
+            in_serving_size = String(incoming.serving_size or "").trim();
+            in_package_unit = normalize_unit(String(incoming.package_unit or incoming.unit or "PIECE"));
             next_merged: list = [];
             found = false;
             for cur in merged {
                 cur_name = String(cur.name or "").trim();
                 cur_unit = normalize_unit(String(cur.unit or "PIECE"));
-                if norm_name(cur_name) == norm_name(in_name) and cur_unit == in_unit {
+                cur_serving_size = String(cur.serving_size or "").trim();
+                cur_package_unit = normalize_unit(String(cur.package_unit or cur.unit or "PIECE"));
+                if norm_name(cur_name) == norm_name(in_name) and cur_unit == in_unit and cur_serving_size == in_serving_size and cur_package_unit == in_package_unit {
+                    cur_qty = qty_or_one(cur.quantity);
+                    incoming_qty = qty_or_one(incoming.quantity);
+                    total_qty = cur_qty + incoming_qty;
+                    cur_package_qty = total_quantity_value(cur.package_quantity, cur.quantity);
+                    incoming_package_qty = total_quantity_value(incoming.package_quantity, incoming.quantity);
                     next_merged = next_merged.concat([{
                         "name": in_name,
-                        "quantity": qty_or_one(cur.quantity) + qty_or_one(incoming.quantity),
+                        "quantity": total_qty,
                         "unit": in_unit,
-                        "cost": num_or_zero(cur.cost) + num_or_zero(incoming.cost),
-                        "protein": num_or_zero(cur.protein) + num_or_zero(incoming.protein),
-                        "carb": num_or_zero(cur.carb) + num_or_zero(incoming.carb),
-                        "fat": num_or_zero(cur.fat) + num_or_zero(incoming.fat)
+                        "cost": per_serving_merge_value(cur.cost, cur_qty, incoming.cost, incoming_qty),
+                        "protein": per_serving_merge_value(cur.protein, cur_qty, incoming.protein, incoming_qty),
+                        "carb": per_serving_merge_value(cur.carb, cur_qty, incoming.carb, incoming_qty),
+                        "fat": per_serving_merge_value(cur.fat, cur_qty, incoming.fat, incoming_qty),
+                        "serving_size": in_serving_size,
+                        "package_quantity": cur_package_qty + incoming_package_qty,
+                        "package_unit": in_package_unit
                     }]);
                     found = true;
                 } else {
@@ -693,15 +805,41 @@ def:pub ReceiptUploadTab(
                     "cost": num_or_zero(incoming.cost),
                     "protein": num_or_zero(incoming.protein),
                     "carb": num_or_zero(incoming.carb),
-                    "fat": num_or_zero(incoming.fat)
+                    "fat": num_or_zero(incoming.fat),
+                    "serving_size": in_serving_size,
+                    "package_quantity": total_quantity_value(incoming.package_quantity, incoming.quantity),
+                    "package_unit": in_package_unit
                 }]);
             }
             merged = next_merged;
         }
-        await set_pantry_items(merged);
+
+        previous_rows = parsed_rows.slice();
+        previous_payload = receipt_parse_payload;
+        previous_text = extracted_text;
+        previous_file_name = receipt_file_name;
+        previous_image_b64 = receipt_image_b64;
+        previous_preview_url = receipt_image_preview_url;
+        previous_image_mime_type = receipt_image_mime_type;
+        previous_camera_error = camera_error_text;
+
         reset_receipt_parse_state(True, True);
-        status_text = ["Added ", String(staged.length), " items to pantry list. Upload next receipt."].join("");
-        add_debug("pantry:add", {"added_count": String(staged.length), "pantry_size": String(pantry_items_ref().length)});
+        status_text = "Adding items to pantry...";
+        try {
+            await set_pantry_items(merged);
+            status_text = ["Added ", String(staged.length), " items to pantry list. Upload next receipt."].join("");
+            add_debug("pantry:add", {"added_count": String(staged.length), "pantry_size": String(pantry_items_ref().length)});
+        } except Exception as e {
+            parsed_rows = previous_rows;
+            receipt_parse_payload = previous_payload;
+            extracted_text = previous_text;
+            receipt_file_name = previous_file_name;
+            receipt_image_b64 = previous_image_b64;
+            receipt_image_preview_url = previous_preview_url;
+            receipt_image_mime_type = previous_image_mime_type;
+            camera_error_text = previous_camera_error;
+            status_text = "Add to pantry failed: " + e.toString();
+        }
     }
 
     can with [is_active] entry {
@@ -943,6 +1081,7 @@ def:pub ReceiptUploadTab(
                                     <input value={row.quantity_text} onChange={lambda e: any -> None { update_row_qty(row.row_id, e.target.value); }} placeholder="Qty" />
                                     <select value={row.unit} onChange={lambda e: any -> None { update_row_unit(row.row_id, e.target.value); }}>
                                         <option value="PIECE">PIECE</option>
+                                        <option value="LOAF">LOAF</option>
                                         <option value="OZ">OZ</option>
                                         <option value="LB">LB</option>
                                         <option value="CUP">CUP</option>
@@ -966,9 +1105,9 @@ def:pub ReceiptUploadTab(
                     <div style={{"display": "grid", "gap": "6px"}}>
                         {pantry_items_ref().map(
                             lambda item: dict -> JsxElement { return
-                                <div key={[item.name, item.unit, item.quantity].join("-")} style={{"display": "flex", "justifyContent": "space-between", "padding": "8px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#f8fafc"}}>
+                                <div key={[item.name, item.unit, item.quantity, String(item.serving_size or "")].join("-")} style={{"display": "flex", "justifyContent": "space-between", "padding": "8px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#f8fafc"}}>
                                     <span>{item.name}</span>
-                                    <span>{[item.quantity, " ", item.unit].join("")}</span>
+                                    <span>{[total_quantity_display(item), (" | serving " + serving_size_display(item)) if serving_size_display(item).length > 0 else ""].join("")}</span>
                                 </div>; }
                         )}
                     </div>

@@ -18,9 +18,29 @@ watchdog = ">=3.0.0"
 [jacpack]
 name = "CaloReceipt"
 description = "A brief description of what this template provides"
-jaclang = "0.10.0"
+jaclang = "0.13.3"
 
 [serve]
 base_route_app = "app"
+
+[plugins.scale.kubernetes]
+ingress_session_affinity = true
+
+[plugins.scale.sso]
+host = "http://localhost:8000/sso"
+
+[plugins.scale.sso.google]
+# Keep real OAuth credentials out of git. Set
+# SSO_GOOGLE_CLIENT_ID and SSO_GOOGLE_CLIENT_SECRET in the environment.
+client_id = ""
+client_secret = ""
+
+[plugins.scale.sso.apple]
+client_id = ""
+client_secret = ""
+team_id = ""
+key_id = ""
+private_key_path = ""
+private_key = ""
 
 [plugins.client]

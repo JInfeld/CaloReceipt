@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 import os
 from http.cookies import SimpleCookie
+from pathlib import Path
 from urllib.parse import urlparse
 
 from jaclang.runtimelib.server import AuthHandler, JacAPIServer
 from jaclang.runtimelib.transport import HTTPTransport, Meta, TransportResponse
+from dotenv import load_dotenv
 
 _PATCHED = False
 _ORIG_HTTP_SEND = HTTPTransport.send
 _ORIG_AUTH_LOGIN = AuthHandler.login
 _ORIG_CREATE_HANDLER = JacAPIServer.create_handler
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 
 def _apply_cors_headers(handler) -> None:

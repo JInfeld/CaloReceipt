@@ -22,6 +22,13 @@ Start the development server:
 jac start main.jac
 ```
 
+For local Google SSO, set these in [`.env`](/Users/jordaninfeld/Desktop/eecs449/CaloReceipt/.env):
+
+```bash
+SSO_GOOGLE_CLIENT_ID=...
+SSO_GOOGLE_CLIENT_SECRET=...
+```
+
 ## Components
 
 Create Jac components in `components/` as `.cl.jac` files and import them:

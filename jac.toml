@@ -31,7 +31,7 @@ host = "http://localhost:8000/sso"
 
 [plugins.scale.sso.google]
 # Keep real OAuth credentials out of git. Set
-# SSO_GOOGLE_CLIENT_ID and SSO_GOOGLE_CLIENT_SECRET in the environment.
+# SSO_GOOGLE_CLIENT_ID and SSO_GOOGLE_CLIENT_SECRET in `.env` or the shell environment.
 client_id = ""
 client_secret = ""
 

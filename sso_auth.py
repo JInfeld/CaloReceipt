@@ -13,11 +13,14 @@ from urllib.parse import urlencode
 
 import httpx
 import jwt
+from dotenv import load_dotenv
 from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi_sso.sso.google import GoogleSSO
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
 SUPPORTED_SSO_PLATFORMS = ("google", "apple")
 SUPPORTED_SSO_OPERATIONS = ("login", "register")
 APPLE_AUTH_URL = "https://appleid.apple.com/auth/authorize"

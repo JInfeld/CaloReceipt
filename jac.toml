@@ -4,13 +4,11 @@ version = "1.0.0"
 description = "Jac client application: CaloReceipt"
 entry-point = "main.jac"
 
-[dependencies]
-
 [dependencies.npm]
-jac-client-node = "1.0.4"
+jac-client-node = "1.0.7"
 
 [dependencies.npm.dev]
-"@jac-client/dev-deps" = "1.0.0"
+"@jac-client/dev-deps" = "2.0.0"
 
 [dev-dependencies]
 watchdog = ">=3.0.0"
@@ -30,8 +28,6 @@ ingress_session_affinity = true
 host = "http://localhost:8000/sso"
 
 [plugins.scale.sso.google]
-# Keep real OAuth credentials out of git. Set
-# SSO_GOOGLE_CLIENT_ID and SSO_GOOGLE_CLIENT_SECRET in `.env` or the shell environment.
 client_id = ""
 client_secret = ""
 

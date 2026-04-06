@@ -253,16 +253,7 @@ def:pub DashboardAiTab(on_auth_error: any = None) -> JsxElement {
     }
 
     return
-        <div
-            style={{
-                "background": "#ffffffde",
-                "border": "1px solid #d2e3f5",
-                "borderRadius": "18px",
-                "padding": "18px",
-                "display": "grid",
-                "gap": "16px"
-            }}
-        >
+        <div className="card cr-module-shell" style={{"display": "grid", "gap": "16px"}}>
             <div>
                 <h2 style={{"margin": "0"}}>Dashboard / AI Bot</h2>
                 <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
@@ -270,7 +261,7 @@ def:pub DashboardAiTab(on_auth_error: any = None) -> JsxElement {
                 </p>
             </div>
 
-            <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
+            <div className="cr-status info">
                 {[( "Working... " if loading else "Ready. " ), status_text].join("")}
             </div>
 

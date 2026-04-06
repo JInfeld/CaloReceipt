@@ -10,11 +10,9 @@ def:pub ReceiptUploadTab(
     is_active: bool = true
 ) -> JsxElement {
     has loading: bool = false;
-    has status_text: str = "Capture or upload a receipt image, parse it with API, review items, and add to pantry.";
+    has status_text: str = "Upload a receipt or paste the items, review the results, and add them to your pantry.";
     has ocr_last_duration_ms: int = 0;
-    has ocr_timer_display: str = "Last OCR time: --";
-    has request_counter: int = 0;
-    has receipt_debug_events: list = [];
+    has ocr_timer_display: str = "Last scan: --";
 
     has receipt_file_name: str = "";
     has receipt_image_b64: str = "";
@@ -27,7 +25,10 @@ def:pub ReceiptUploadTab(
 
     has extracted_text: str = "";
     has parsed_rows: list = [];
-    has receipt_parse_payload: dict = {};
+    has parse_source_display: str = "Parser: --";
+    has usda_lookup_display: str = "USDA lookup: --";
+    has usda_matched_count: int = 0;
+    has usda_unresolved_count: int = 0;
 
     def now_ms() -> int {
         now_obj = Reflect.construct(Date, []);
@@ -274,6 +275,97 @@ def:pub ReceiptUploadTab(
         return [String(display_qty), " ", display_unit].join("");
     }
 
+    def count_or_zero(raw: any) -> int {
+        parsed = parseInt(String(raw or "0"));
+        if isNaN(parsed) or parsed < 0 {
+            return 0;
+        }
+        return parsed;
+    }
+
+    def format_macro_value(raw: any) -> str {
+        return String((num_or_zero(raw)).toFixed(1));
+    }
+
+    def nutrition_summary_text(item: any) -> str {
+        serving_text = String(item.serving_size or "").trim();
+        protein_value = num_or_zero(item.protein);
+        carb_value = num_or_zero(item.carb);
+        fat_value = num_or_zero(item.fat);
+        has_macros = protein_value > 0.0 or carb_value > 0.0 or fat_value > 0.0;
+        if serving_text.length == 0 and not has_macros {
+            return "";
+        }
+
+        macro_text = "";
+        if has_macros {
+            macro_text = [
+                "Protein ",
+                format_macro_value(protein_value),
+                "g | Carbs ",
+                format_macro_value(carb_value),
+                "g | Fat ",
+                format_macro_value(fat_value),
+                "g"
+            ].join("");
+        }
+        if serving_text.length > 0 and macro_text != "" {
+            return ["Serving ", serving_text, " | ", macro_text].join("");
+        }
+        if serving_text.length > 0 {
+            return "Serving ".concat(serving_text);
+        }
+        return macro_text;
+    }
+
+    def parse_stage_display(raw_stage: any, used_image_scan: bool) -> str {
+        if not used_image_scan {
+            return "Parser: Typed Receipt LLM";
+        }
+        stage_text = String(raw_stage or "").trim().toLowerCase();
+        if stage_text == "llm_pipeline" {
+            return "Parser: OCR Pipeline LLM";
+        }
+        if stage_text == "llm_image" {
+            return "Parser: Image LLM";
+        }
+        if stage_text == "llm_text" {
+            return "Parser: OCR Text LLM Fallback";
+        }
+        if stage_text == "llm_fallback" {
+            return "Parser: Basic OCR Fallback";
+        }
+        return "Parser: Receipt LLM";
+    }
+
+    def usda_lookup_summary(raw_lookup: any, item_count: int) -> str {
+        if item_count <= 0 {
+            return "USDA lookup: --";
+        }
+
+        matched_count = 0;
+        unresolved_count = 0;
+        if raw_lookup {
+            matched_count = count_or_zero(raw_lookup.matched_count);
+            unresolved_count = count_or_zero(raw_lookup.unresolved_count);
+        }
+
+        if matched_count <= 0 and unresolved_count <= 0 {
+            return "USDA lookup: no direct match data returned yet";
+        }
+        if unresolved_count > 0 {
+            return ["USDA lookup: matched ", String(matched_count), "/", String(item_count), " | review ", String(unresolved_count)].join("");
+        }
+        return ["USDA lookup: matched ", String(matched_count), "/", String(item_count)].join("");
+    }
+
+    def reset_scan_feedback() -> None {
+        parse_source_display = "Parser: --";
+        usda_lookup_display = "USDA lookup: --";
+        usda_matched_count = 0;
+        usda_unresolved_count = 0;
+    }
+
     def per_serving_merge_value(left_value: any, left_qty: float, right_value: any, right_qty: float) -> float {
         total_qty = left_qty + right_qty;
         if total_qty <= 0.0 {
@@ -327,20 +419,12 @@ def:pub ReceiptUploadTab(
         }
     }
 
-    def add_debug(event_name: str, payload: dict = {}) -> None {
-        receipt_debug_events = ([{
-            "ts_ms": now_ms(),
-            "event": event_name,
-            "payload": payload
-        }]).concat(receipt_debug_events).slice(0, 80);
-    }
-
     def reset_receipt_parse_state(clear_file: bool = False, clear_text: bool = False) -> None {
         if clear_text {
             extracted_text = "";
         }
         parsed_rows = [];
-        receipt_parse_payload = {};
+        reset_scan_feedback();
         if clear_file {
             close_camera();
             receipt_file_name = "";
@@ -425,7 +509,21 @@ def:pub ReceiptUploadTab(
 
     def stage_from_text() -> None {
         parsed_rows = parse_receipt_output(extracted_text);
-        status_text = ["Parsed ", String(parsed_rows.length), " items from text."].join("");
+        parse_source_display = "Parser: Manual Typed List";
+        usda_lookup_display = "USDA lookup: skipped for manual typed list";
+        usda_matched_count = 0;
+        usda_unresolved_count = 0;
+        status_text = ["Parsed ", String(parsed_rows.length), " items from the text you entered."].join("");
+    }
+
+    def intake_state_label() -> str {
+        if has_receipt_preview() {
+            return "Photo Ready";
+        }
+        if extracted_text.trim() {
+            return "Typed Receipt Ready";
+        }
+        return "Waiting For Receipt";
     }
 
     def add_empty_item_row() -> None {
@@ -562,22 +660,19 @@ def:pub ReceiptUploadTab(
             return;
         }
         if not receipt_image_b64 and not extracted_text.trim() {
-            status_text = "Provide either an image upload or receipt text to parse.";
+            status_text = "Add a receipt photo or type the items before scanning.";
             return;
         }
 
-        request_counter += 1;
-        req_id = ["receipt-", String(now_ms()), "-", String(request_counter)].join("");
         loading = true;
-        status_text = "Running OCR and parser...";
+        status_text = "Scanning your receipt...";
         text_input = extracted_text;
         reset_receipt_parse_state(False, False);
-        add_debug("parse:start", {"request_id": req_id, "has_image": (receipt_image_b64 != ""), "has_text": (extracted_text.trim() != "")});
         started_at = now_ms();
         try {
             result = {};
             if receipt_image_b64 {
-                status_text = "Running OCR...";
+                status_text = "Reading the receipt photo...";
                 result = await post_walker_with_timeout(
                     "ParseReceiptImageToPantry",
                     {
@@ -586,7 +681,7 @@ def:pub ReceiptUploadTab(
                     }
                 );
             } else {
-                status_text = "Running parser...";
+                status_text = "Parsing the typed receipt...";
                 result = await post_walker_with_timeout(
                     "ParseReceiptTextToPantry",
                     {"receipt_text": text_input}
@@ -594,8 +689,6 @@ def:pub ReceiptUploadTab(
             }
 
             out = first_report_payload(result);
-            receipt_parse_payload = out;
-            add_debug("parse:response", {"request_id": req_id, "ok": out.ok, "stage": out.stage, "diagnostics": out.diagnostics});
 
             if out.ok == false {
                 stage_name = String(out.stage or "pipeline");
@@ -609,33 +702,59 @@ def:pub ReceiptUploadTab(
                 extracted_text = String(out.extracted_text);
             }
 
-            stage_rows_from_items(out.items or []);
+            parsed_items = out.items or [];
+            item_count = parsed_items.length;
+            stage_rows_from_items(parsed_items);
+            parse_source_display = parse_stage_display(out.stage, receipt_image_b64 != "");
+            matched_count = 0;
+            unresolved_count = 0;
+            if out.nutrition_lookup {
+                matched_count = count_or_zero(out.nutrition_lookup.matched_count);
+                unresolved_count = count_or_zero(out.nutrition_lookup.unresolved_count);
+            }
+            usda_matched_count = matched_count;
+            usda_unresolved_count = unresolved_count;
+            usda_lookup_display = usda_lookup_summary(out.nutrition_lookup, item_count);
             ended_at = now_ms();
             elapsed_ms = ended_at - started_at;
             if elapsed_ms < 1 {
                 elapsed_ms = 1;
             }
+            resolved_duration_ms = elapsed_ms;
             try {
                 if out.diagnostics and out.diagnostics.ocr_ms and out.diagnostics.ocr_ms > 0 {
-                    ocr_last_duration_ms = parseInt(String(out.diagnostics.ocr_ms));
-                } else {
-                    ocr_last_duration_ms = elapsed_ms;
+                    resolved_duration_ms = parseInt(String(out.diagnostics.ocr_ms));
                 }
             } except Exception as _e {
-                ocr_last_duration_ms = elapsed_ms;
+                resolved_duration_ms = elapsed_ms;
             }
-            ocr_timer_display = ["Last OCR time: ", format_elapsed_label(ocr_last_duration_ms)].join("");
-            status_text = ["API parsed ", String((out.items or []).length), " items. Edit item name and total quantity before adding to pantry."].join("");
-            add_debug("parse:success", {"request_id": req_id, "item_count": String((out.items or []).length), "ocr_ms": ocr_last_duration_ms});
+            ocr_last_duration_ms = resolved_duration_ms;
+            ocr_timer_display = ["Last scan: ", format_elapsed_label(resolved_duration_ms)].join("");
+            next_status_text = "";
+            if String(out.stage or "") == "llm_fallback" {
+                next_status_text = ["We found ", String(item_count), " items using the emergency OCR fallback. Review every item, quantity, and unit carefully before saving."].join("");
+            } elif (receipt_image_b64 != "") and String(out.stage or "") == "llm_text" {
+                next_status_text = ["We found ", String(item_count), " items from OCR text parsing. Review the item names and quantities carefully before saving."].join("");
+            } else {
+                next_status_text = ["We found ", String(item_count), " items. Review names and quantities, then add them to your pantry."].join("");
+            }
+            if matched_count > 0 {
+                next_status_text = [next_status_text, " USDA matched ", String(matched_count), "/", String(item_count), " items."].join("");
+            } elif item_count > 0 {
+                next_status_text = [next_status_text, " USDA nutrition still needs review for some items."].join("");
+            }
+            if unresolved_count > 0 {
+                next_status_text = [next_status_text, " ", String(unresolved_count), " item(s) did not get a direct USDA match."].join("");
+            }
+            status_text = next_status_text;
         } except Exception as e {
             err_text = e.toString();
             if String(err_text).includes("AbortError") {
-                status_text = "Receipt parse timed out. Try again or use Parse From Raw Text.";
+                status_text = "Receipt scan timed out. Try again or use the typed receipt option.";
             } else {
-                status_text = "Receipt parse failed: " + err_text;
+                status_text = "Receipt scan failed: " + err_text;
             }
             maybe_trigger_auth_error(err_text);
-            add_debug("parse:error", {"request_id": req_id, "error": err_text});
         }
         loading = false;
     }
@@ -815,29 +934,34 @@ def:pub ReceiptUploadTab(
         }
 
         previous_rows = parsed_rows.slice();
-        previous_payload = receipt_parse_payload;
         previous_text = extracted_text;
         previous_file_name = receipt_file_name;
         previous_image_b64 = receipt_image_b64;
         previous_preview_url = receipt_image_preview_url;
         previous_image_mime_type = receipt_image_mime_type;
         previous_camera_error = camera_error_text;
+        previous_parse_source = parse_source_display;
+        previous_lookup_display = usda_lookup_display;
+        previous_lookup_matched = usda_matched_count;
+        previous_lookup_unresolved = usda_unresolved_count;
 
         reset_receipt_parse_state(True, True);
         status_text = "Adding items to pantry...";
         try {
             await set_pantry_items(merged);
-            status_text = ["Added ", String(staged.length), " items to pantry list. Upload next receipt."].join("");
-            add_debug("pantry:add", {"added_count": String(staged.length), "pantry_size": String(pantry_items_ref().length)});
+            status_text = ["Added ", String(staged.length), " items to your pantry. You can upload another receipt whenever you're ready."].join("");
         } except Exception as e {
             parsed_rows = previous_rows;
-            receipt_parse_payload = previous_payload;
             extracted_text = previous_text;
             receipt_file_name = previous_file_name;
             receipt_image_b64 = previous_image_b64;
             receipt_image_preview_url = previous_preview_url;
             receipt_image_mime_type = previous_image_mime_type;
             camera_error_text = previous_camera_error;
+            parse_source_display = previous_parse_source;
+            usda_lookup_display = previous_lookup_display;
+            usda_matched_count = previous_lookup_matched;
+            usda_unresolved_count = previous_lookup_unresolved;
             status_text = "Add to pantry failed: " + e.toString();
         }
     }
@@ -853,259 +977,259 @@ def:pub ReceiptUploadTab(
     }
 
     return
-        <div
-            style={{
-                "background": "#ffffffde",
-                "border": "1px solid #d2e3f5",
-                "borderRadius": "18px",
-                "padding": "18px",
-                "display": "grid",
-                "gap": "14px"
-            }}
-        >
+        <div className="card cr-module-shell" style={{"display": "grid", "gap": "16px"}}>
             <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "12px", "flexWrap": "wrap"}}>
                 <div>
                     <h2 style={{"margin": "0"}}>Receipt Upload</h2>
                     <p style={{"margin": "6px 0 0 0", "opacity": "0.76"}}>
-                        Use the in-app camera for mobile-style capture, or upload from your computer when a webcam is not ideal.
+                        Scan a grocery receipt, review the items we found, and add them to your pantry in one pass.
                     </p>
                 </div>
-                <div style={{"background": "#eff6ff", "border": "1px solid #bfdbfe", "borderRadius": "10px", "padding": "8px 10px", "fontWeight": "700"}}>
-                    {receipt_file_name if receipt_file_name else "No file chosen"}
+                <div className="cr-chip info">
+                    {receipt_file_name if receipt_file_name else intake_state_label()}
                 </div>
             </div>
 
-            <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
+            <div className="receipt-summary-grid">
+                <div className="stat-card">
+                    <div className="stat-label">Receipt Input</div>
+                    <div className="stat-value">{intake_state_label()}</div>
+                    <div className="card-subtitle">
+                        {("Ready to scan" if has_receipt_preview() or extracted_text.trim() else "Add a photo or type the receipt")}
+                    </div>
+                </div>
+                <div className="stat-card">
+                    <div className="stat-label">Items Ready</div>
+                    <div className="stat-value">{String(parsed_rows.length)}</div>
+                    <div className="card-subtitle">Review names and quantities before saving.</div>
+                </div>
+                <div className="stat-card">
+                    <div className="stat-label">Pantry Items</div>
+                    <div className="stat-value">{String(pantry_items_ref().length)}</div>
+                    <div className="card-subtitle">Current ingredients already stored in your pantry.</div>
+                </div>
+                <div className="stat-card">
+                    <div className="stat-label">USDA Lookup</div>
+                    <div className="stat-value">
+                        {([String(usda_matched_count), "/", String(parsed_rows.length)].join("") if parsed_rows.length > 0 else "--")}
+                    </div>
+                    <div className="card-subtitle">{usda_lookup_display}</div>
+                </div>
+            </div>
+
+            <div className="cr-status info">
                 {[( "Working... " if loading else "Ready. " ), status_text].join("")}
             </div>
-            <div style={{"fontWeight": "600"}}>{ocr_timer_display}</div>
 
-            <div style={{"display": "grid", "gridTemplateColumns": "minmax(0, 1fr) minmax(0, 1fr)", "gap": "12px"}}>
-                <div style={{"display": "grid", "gap": "10px"}}>
-                    <label style={{"fontWeight": "700"}}>1) Capture Or Upload Receipt</label>
-                    <div
-                        style={{
-                            "display": "grid",
-                            "gap": "12px",
-                            "padding": "14px",
-                            "borderRadius": "16px",
-                            "border": "1px solid #d9e7f6",
-                            "background": "linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%)"
-                        }}
-                    >
-                        <div
+            <div className="receipt-layout">
+                <div className="card receipt-section-card">
+                    <div className="card-header" style={{"marginBottom": "0"}}>
+                        <div>
+                            <div className="card-title">1. Capture Or Upload</div>
+                            <div className="card-subtitle">Use the camera on mobile or upload a clear photo from desktop.</div>
+                        </div>
+                    </div>
+
+                    <div className="receipt-preview-frame">
+                        <video
+                            id={camera_video_id()}
+                            autoPlay={true}
+                            playsInline={true}
+                            muted={true}
                             style={{
-                                "position": "relative",
-                                "minHeight": "320px",
-                                "borderRadius": "18px",
-                                "overflow": "hidden",
-                                "background": "#0f172a",
-                                "border": "1px solid #c7d8ef"
+                                "display": ("block" if camera_open else "none"),
+                                "width": "100%",
+                                "height": "100%",
+                                "objectFit": "cover",
+                                "minHeight": "340px",
+                                "background": "#0f172a"
                             }}
+                        />
+                        <img
+                            src={receipt_image_preview_url}
+                            alt="Receipt preview"
+                            style={{
+                                "display": ("block" if (not camera_open) and has_receipt_preview() else "none"),
+                                "width": "100%",
+                                "height": "100%",
+                                "objectFit": "cover",
+                                "minHeight": "340px",
+                                "background": "#0f172a"
+                            }}
+                        />
+                        <div
+                            className="receipt-preview-empty"
+                            style={{"display": ("grid" if (not camera_open) and not has_receipt_preview() else "none")}}
                         >
-                            <video
-                                id={camera_video_id()}
-                                autoPlay={true}
-                                playsInline={true}
-                                muted={true}
-                                style={{
-                                    "display": ("block" if camera_open else "none"),
-                                    "width": "100%",
-                                    "height": "100%",
-                                    "objectFit": "cover",
-                                    "minHeight": "320px",
-                                    "background": "#0f172a"
-                                }}
-                            />
-                            <img
-                                src={receipt_image_preview_url}
-                                alt="Receipt preview"
-                                style={{
-                                    "display": ("block" if (not camera_open) and has_receipt_preview() else "none"),
-                                    "width": "100%",
-                                    "height": "100%",
-                                    "objectFit": "cover",
-                                    "minHeight": "320px",
-                                    "background": "#0f172a"
-                                }}
-                            />
-                            <div
-                                style={{
-                                    "display": ("grid" if (not camera_open) and not has_receipt_preview() else "none"),
-                                    "placeItems": "center",
-                                    "padding": "28px",
-                                    "minHeight": "320px",
-                                    "color": "#e2e8f0",
-                                    "textAlign": "center",
-                                    "gap": "10px",
-                                    "background": "radial-gradient(circle at top, rgba(59,130,246,0.25) 0%, rgba(15,23,42,0) 38%), linear-gradient(180deg, #0f172a 0%, #111827 100%)"
-                                }}
-                            >
-                                <div style={{"fontSize": "1.05rem", "fontWeight": "700"}}>Custom Receipt Camera</div>
-                                <div style={{"maxWidth": "260px", "lineHeight": "1.5"}}>
-                                    {("Tap Open Camera and center the full receipt inside the frame." if in_app_camera_supported() else "This browser does not support in-app camera access. Upload a receipt image instead.")}
-                                </div>
-                            </div>
-                            <div
-                                style={{
-                                    "position": "absolute",
-                                    "inset": "18px",
-                                    "border": "2px solid rgba(255,255,255,0.75)",
-                                    "borderRadius": "20px",
-                                    "pointerEvents": "none",
-                                    "boxShadow": "0 0 0 1px rgba(15,23,42,0.22) inset"
-                                }}
-                            />
-                            <div
-                                style={{
-                                    "position": "absolute",
-                                    "left": "18px",
-                                    "right": "18px",
-                                    "bottom": "16px",
-                                    "display": "flex",
-                                    "justifyContent": "space-between",
-                                    "alignItems": "center",
-                                    "gap": "10px",
-                                    "pointerEvents": "none"
-                                }}
-                            >
-                                <div style={{"padding": "7px 10px", "borderRadius": "999px", "background": "rgba(15,23,42,0.72)", "color": "#f8fafc", "fontWeight": "700"}}>
-                                    {("Live Camera" if camera_open else ("Photo Ready" if has_receipt_preview() else "Awaiting Capture"))}
-                                </div>
-                                <div style={{"padding": "7px 10px", "borderRadius": "999px", "background": "rgba(15,23,42,0.72)", "color": "#cbd5e1", "fontSize": "0.9rem"}}>
-                                    {("Landscape photos work best for long receipts" if camera_open else "Upload remains available on desktop")}
-                                </div>
+                            <div className="receipt-preview-title">Receipt Camera</div>
+                            <div className="receipt-preview-copy">
+                                {("Open the camera and keep the full receipt inside the frame." if in_app_camera_supported() else "This browser does not support in-app camera access. Upload a receipt image instead.")}
                             </div>
                         </div>
-                        <canvas id={camera_canvas_id()} style={{"display": "none"}} />
-                        <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
-                            <button
-                                onClick={start_camera}
-                                disabled={camera_starting}
-                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #0f766e", "background": "#ccfbf1", "fontWeight": "700"}}
-                            >
-                                {("Starting..." if camera_starting else ("Retake Photo" if has_receipt_preview() else "Open Camera"))}
-                            </button>
-                            <button
-                                onClick={capture_camera_photo}
-                                disabled={(not camera_open) or camera_starting}
-                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#dbeafe", "fontWeight": "700"}}
-                            >
-                                Take Photo
-                            </button>
-                            <button
-                                onClick={close_camera}
-                                disabled={not camera_open}
-                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff", "fontWeight": "700"}}
-                            >
-                                Close Camera
-                            </button>
-                            <button
-                                onClick={clear_loaded_receipt_image}
-                                disabled={(not has_receipt_preview()) and (receipt_image_b64 == "")}
-                                style={{"padding": "9px 13px", "borderRadius": "10px", "border": "1px solid #fecaca", "background": "#fff1f2", "fontWeight": "700"}}
-                            >
-                                Clear Image
-                            </button>
-                        </div>
-                        <div style={{"display": "grid", "gap": "6px"}}>
-                            <label style={{"fontWeight": "700"}}>Upload Instead</label>
-                            <input type="file" accept="image/*" capture="environment" onChange={on_receipt_file_change} />
-                            <div style={{"opacity": "0.72", "fontSize": "0.94rem"}}>
-                                Desktop users can upload screenshots or photos. Mobile browsers may still offer the native camera here as a fallback.
+                        <div className="receipt-preview-guides" />
+                        <div className="receipt-preview-caption">
+                            <div className="receipt-preview-pill">
+                                {("Live Camera" if camera_open else ("Photo Ready" if has_receipt_preview() else "Awaiting Receipt"))}
+                            </div>
+                            <div className="receipt-preview-pill secondary">
+                                {("Landscape photos work best for long receipts" if camera_open else "Upload works on desktop and mobile")}
                             </div>
                         </div>
-                        {(
-                            <div style={{"padding": "10px 12px", "borderRadius": "12px", "border": "1px solid #fecaca", "background": "#fff1f2", "color": "#991b1b", "fontWeight": "600"}}>
-                                {camera_error_text}
-                            </div>
-                        ) if camera_error_text else None}
                     </div>
-                    <label style={{"fontWeight": "700"}}>2) Raw OCR Text (optional / editable)</label>
-                    <textarea
-                        value={extracted_text}
-                        onChange={lambda e: any -> None { extracted_text = e.target.value; }}
-                        style={{"minHeight": "120px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "padding": "10px"}}
-                    />
-                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
-                        <button
-                            onClick={parse_receipt_api}
-                            disabled={loading}
-                            style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#dbeafe", "fontWeight": "700"}}
-                        >
-                            Parse Receipt (API)
+
+                    <canvas id={camera_canvas_id()} style={{"display": "none"}} />
+
+                    <div className="receipt-action-row">
+                        <button onClick={start_camera} disabled={camera_starting} className="btn cr-btn-success">
+                            {("Starting..." if camera_starting else ("Retake Photo" if has_receipt_preview() else "Open Camera"))}
                         </button>
-                        <button
-                            onClick={stage_from_text}
-                            style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #7c3aed", "background": "#ede9fe", "fontWeight": "700"}}
-                        >
-                            Parse From Raw Text
+                        <button onClick={capture_camera_photo} disabled={(not camera_open) or camera_starting} className="btn cr-btn-accent">
+                            Take Photo
+                        </button>
+                        <button onClick={parse_receipt_api} disabled={loading or ((not receipt_image_b64) and (not extracted_text.trim()))} className="btn btn-secondary">
+                            {("Scan Receipt" if receipt_image_b64 else "Scan Typed Receipt")}
+                        </button>
+                        <button onClick={clear_loaded_receipt_image} disabled={(not has_receipt_preview()) and (receipt_image_b64 == "")} className="btn cr-btn-danger">
+                            Clear
                         </button>
                     </div>
+
+                    <div className="receipt-upload-block">
+                        <label className="form-label">Upload Instead</label>
+                        <input type="file" accept="image/*" capture="environment" onChange={on_receipt_file_change} />
+                        <div className="card-subtitle">
+                            Upload a receipt screenshot or photo when using a laptop, or when the in-app camera is not ideal.
+                        </div>
+                    </div>
+
+                    {(
+                        <div className="cr-status warning">{camera_error_text}</div>
+                    ) if camera_error_text else None}
                 </div>
 
-                <div style={{"background": "#f8fbff", "border": "1px dashed #c7d8ef", "borderRadius": "12px", "padding": "10px", "display": "grid", "gap": "8px"}}>
-                    <h3 style={{"margin": "0"}}>Latest Parse Payload</h3>
-                    <pre style={{"margin": "0", "background": "#0f172a", "color": "#e2e8f0", "borderRadius": "10px", "padding": "10px", "overflowX": "auto", "maxHeight": "220px", "overflowY": "auto"}}>{JSON.stringify(receipt_parse_payload, None, 2)}</pre>
-                    <button
-                        onClick={add_to_pantry}
-                        disabled={loading}
-                        style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #0f766e", "background": "#ccfbf1", "fontWeight": "700", "width": "fit-content"}}
-                    >
-                        Add Items To Pantry
-                    </button>
+                <div className="receipt-side-stack">
+                    <div className="card receipt-section-card">
+                        <div className="card-header" style={{"marginBottom": "0"}}>
+                            <div>
+                                <div className="card-title">2. Type Receipt Instead</div>
+                                <div className="card-subtitle">Useful when a photo is unavailable or you only want a quick manual entry.</div>
+                            </div>
+                        </div>
+                        <textarea
+                            value={extracted_text}
+                            onChange={lambda e: any -> None { extracted_text = e.target.value; }}
+                            placeholder={"Example:\nBananas 6\nGreek Yogurt 1\nSpinach 1"}
+                            style={{"minHeight": "180px"}}
+                        />
+                        <div className="receipt-action-row">
+                            <button onClick={parse_receipt_api} disabled={loading or ((not receipt_image_b64) and (not extracted_text.trim()))} className="btn cr-btn-accent">
+                                Scan Typed Receipt
+                            </button>
+                            <button onClick={stage_from_text} disabled={extracted_text.trim().length == 0} className="btn btn-secondary">
+                                Use Typed List
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="card receipt-section-card">
+                        <div className="card-header" style={{"marginBottom": "0"}}>
+                            <div>
+                                <div className="card-title">Quick Tips</div>
+                                <div className="card-subtitle">A cleaner scan usually means fewer edits.</div>
+                            </div>
+                        </div>
+                        <div className="receipt-tips">
+                            <div className="receipt-tip">Keep the whole receipt inside the frame and avoid cutting off the store header or bottom totals.</div>
+                            <div className="receipt-tip">Flat lighting works best. Reduce shadows, glare, and wrinkles before taking the photo.</div>
+                            <div className="receipt-tip">After scanning, edit item names and package quantities if anything looks off before saving.</div>
+                        </div>
+                        <div className="receipt-metric">
+                            {ocr_timer_display}
+                        </div>
+                        <div className="card-subtitle">{parse_source_display}</div>
+                    </div>
                 </div>
             </div>
 
-            <div style={{"background": "#fff7ed", "border": "1px solid #fdba74", "borderRadius": "12px", "padding": "10px"}}>
-                <h3 style={{"margin": "0 0 8px 0"}}>Receipt Debug (latest 80)</h3>
-                <pre style={{"margin": "0", "background": "#111827", "color": "#fde68a", "borderRadius": "10px", "padding": "10px", "overflowX": "auto", "maxHeight": "180px", "overflowY": "auto"}}>
-                    {JSON.stringify(receipt_debug_events, None, 2)}
-                </pre>
-            </div>
-
-            <div style={{"display": "grid", "gap": "10px"}}>
-                <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "8px", "flexWrap": "wrap"}}>
-                    <h3 style={{"margin": "0"}}>Extracted Items (Editable)</h3>
-                    <button onClick={add_empty_item_row} style={{"padding": "7px 11px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#eff6ff", "fontWeight": "700"}}>Add Item Row</button>
+            <div className="card receipt-section-card">
+                <div className="card-header">
+                    <div>
+                        <div className="card-title">3. Review Items</div>
+                        <div className="card-subtitle">Make sure the item names and package quantities match your receipt before adding them.</div>
+                    </div>
+                    <div className="receipt-action-row">
+                        <button onClick={add_empty_item_row} className="btn btn-secondary">Add Item</button>
+                        <button onClick={add_to_pantry} disabled={loading or parsed_rows.length == 0} className="btn cr-btn-success">
+                            Add Items To Pantry
+                        </button>
+                    </div>
                 </div>
 
                 {(
-                    <div style={{"opacity": "0.75"}}>No extracted items yet. Parse receipt first or add rows manually.</div>
+                    <div className="receipt-empty-state">
+                        Scan a receipt or type in the items to start building your pantry update.
+                    </div>
                 ) if parsed_rows.length == 0 else (
-                    <div style={{"display": "grid", "gap": "8px"}}>
+                    <div className="receipt-editor-list">
                         {parsed_rows.map(
-                            lambda row: dict -> JsxElement { return
-                                <div key={row.row_id.toString()} style={{"display": "grid", "gridTemplateColumns": "minmax(0, 2fr) minmax(120px, 1fr) minmax(130px, 1fr) auto", "gap": "8px", "alignItems": "center", "padding": "10px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#ffffff"}}>
-                                    <input value={row.name} onChange={lambda e: any -> None { update_row_name(row.row_id, e.target.value); }} placeholder="Item name" />
-                                    <input value={row.quantity_text} onChange={lambda e: any -> None { update_row_qty(row.row_id, e.target.value); }} placeholder="Qty" />
-                                    <select value={row.unit} onChange={lambda e: any -> None { update_row_unit(row.row_id, e.target.value); }}>
-                                        <option value="PIECE">PIECE</option>
-                                        <option value="LOAF">LOAF</option>
-                                        <option value="OZ">OZ</option>
-                                        <option value="LB">LB</option>
-                                        <option value="CUP">CUP</option>
-                                        <option value="TBSP">TBSP</option>
-                                        <option value="TSP">TSP</option>
-                                        <option value="CLOVE">CLOVE</option>
-                                        <option value="BUNCH">BUNCH</option>
-                                    </select>
-                                    <button onClick={lambda -> None { remove_row(row.row_id); }} style={{"border": "1px solid #fecaca", "background": "#fff1f2", "borderRadius": "8px", "padding": "6px 8px"}}>Remove</button>
+                            lambda row: dict -> JsxElement {
+                                row_nutrition_text = nutrition_summary_text(row);
+                                return
+                                <div key={row.row_id.toString()} className="receipt-editor-row">
+                                    <div className="receipt-editor-main">
+                                        <div className="form-group">
+                                            <label className="form-label">Item Name</label>
+                                            <input value={row.name} onChange={lambda e: any -> None { update_row_name(row.row_id, e.target.value); }} placeholder="Item name" />
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Package Quantity</label>
+                                            <input value={row.quantity_text} onChange={lambda e: any -> None { update_row_qty(row.row_id, e.target.value); }} placeholder="Qty" />
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Unit</label>
+                                            <select value={row.unit} onChange={lambda e: any -> None { update_row_unit(row.row_id, e.target.value); }}>
+                                                <option value="PIECE">PIECE</option>
+                                                <option value="LOAF">LOAF</option>
+                                                <option value="OZ">OZ</option>
+                                                <option value="LB">LB</option>
+                                                <option value="CUP">CUP</option>
+                                                <option value="TBSP">TBSP</option>
+                                                <option value="TSP">TSP</option>
+                                                <option value="CLOVE">CLOVE</option>
+                                                <option value="BUNCH">BUNCH</option>
+                                            </select>
+                                        </div>
+                                        {(
+                                            <div className="card-subtitle" style={{"gridColumn": "1 / -1"}}>
+                                                {row_nutrition_text}
+                                            </div>
+                                        ) if row_nutrition_text.length > 0 else None}
+                                    </div>
+                                    <button onClick={lambda -> None { remove_row(row.row_id); }} className="btn cr-btn-danger">
+                                        Remove
+                                    </button>
                                 </div>; }
                         )}
                     </div>
                 )}
             </div>
 
-            <div style={{"display": "grid", "gap": "8px"}}>
-                <h3 style={{"margin": "0"}}>Pantry Preview</h3>
+            <div className="card receipt-section-card">
+                <div className="card-header" style={{"marginBottom": "0"}}>
+                    <div>
+                        <div className="card-title">Pantry Preview</div>
+                        <div className="card-subtitle">Your pantry stays cumulative, so repeat purchases are merged with existing items.</div>
+                    </div>
+                </div>
                 {(
-                    <div style={{"opacity": "0.75"}}>No pantry items added from receipts yet.</div>
+                    <div className="receipt-empty-state">
+                        No pantry items yet. Once you add a receipt, your pantry preview will show up here.
+                    </div>
                 ) if pantry_items_ref().length == 0 else (
-                    <div style={{"display": "grid", "gap": "6px"}}>
+                    <div className="receipt-pantry-list">
                         {pantry_items_ref().map(
                             lambda item: dict -> JsxElement { return
-                                <div key={[item.name, item.unit, item.quantity, String(item.serving_size or "")].join("-")} style={{"display": "flex", "justifyContent": "space-between", "padding": "8px", "border": "1px solid #e2e8f0", "borderRadius": "10px", "background": "#f8fafc"}}>
+                                <div key={[item.name, item.unit, item.quantity, String(item.serving_size or "")].join("-")} className="receipt-pantry-row">
                                     <span>{item.name}</span>
                                     <span>{[total_quantity_display(item), (" | serving " + serving_size_display(item)) if serving_size_display(item).length > 0 else ""].join("")}</span>
                                 </div>; }

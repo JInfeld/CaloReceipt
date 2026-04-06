@@ -17,25 +17,17 @@ sv import from user {
 def:pub RecipesTab(
     shared_state: dict = {},
     on_auth_error: any = None,
-    on_pantry_change: any = None
+    on_pantry_change: any = None,
+    on_nutrition_change: any = None
 ) -> JsxElement {
     has filter_mode: str = "all";
     has loading: bool = false;
-    has status_text: str = "Recipe API ready.";
+    has status_text: str = "Ready to build a recipe from your pantry.";
 
     has recipes: list = [];
 
-    has pantry_name: str = "";
-    has pantry_quantity: str = "1";
-    has pantry_unit: str = "PIECE";
-    has pantry_cost: str = "0";
-    has pantry_protein: str = "0";
-    has pantry_carb: str = "0";
-    has pantry_fat: str = "0";
-
     has generated_recipe: dict = {};
     has macro_needs: dict = {};
-    has new_recipe_idea: dict = {};
     has active_rank_recipe_id: str = "";
     has active_rank_tier: str = "";
     has active_rank_candidates: list = [];
@@ -46,6 +38,8 @@ def:pub RecipesTab(
     has pending_rate_recipe_id: str = "";
     has show_made_confirm: bool = false;
     has expanded_recipe_id: str = "";
+    has generated_meal_type: str = "dinner";
+    has saved_meal_choices: dict = {};
 
     def first_report_payload(raw_result: dict) -> dict {
         if not raw_result {
@@ -120,6 +114,31 @@ def:pub RecipesTab(
             return fallback;
         }
         return parsed;
+    }
+
+    def normalize_meal_type(raw: any, fallback: str = "dinner") -> str {
+        meal_text = String(raw or "").trim().toLowerCase();
+        if meal_text == "breakfast" or meal_text == "lunch" or meal_text == "dinner" or meal_text == "snack" {
+            return meal_text;
+        }
+        return fallback;
+    }
+
+    def meal_label(raw: any) -> str {
+        meal_text = normalize_meal_type(raw, "");
+        if meal_text == "breakfast" {
+            return "Breakfast";
+        }
+        if meal_text == "lunch" {
+            return "Lunch";
+        }
+        if meal_text == "dinner" {
+            return "Dinner";
+        }
+        if meal_text == "snack" {
+            return "Snack";
+        }
+        return "Meal";
     }
 
     def normalized_profile_choice(raw: any) -> str {
@@ -199,6 +218,168 @@ def:pub RecipesTab(
         if on_pantry_change {
             await on_pantry_change(items);
         }
+    }
+
+    def pad2(raw: any) -> str {
+        parsed = parseInt(String(raw or "0"));
+        if isNaN(parsed) or parsed < 0 {
+            parsed = 0;
+        }
+        return ["0", String(parsed)].join("").slice(-2);
+    }
+
+    def nutrition_day_name_from_index(day_idx: int) -> str {
+        names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        if day_idx < 0 or day_idx >= names.length {
+            return "Day";
+        }
+        return names[day_idx];
+    }
+
+    def nutrition_date_key_from_ms(anchor_ms: int) -> str {
+        stamp = Reflect.construct(Date, [anchor_ms]);
+        return [
+            String(stamp.getFullYear()),
+            "-",
+            pad2(stamp.getMonth() + 1),
+            "-",
+            pad2(stamp.getDate())
+        ].join("");
+    }
+
+    def nutrition_day_label_from_ms(anchor_ms: int) -> str {
+        stamp = Reflect.construct(Date, [anchor_ms]);
+        return [
+            nutrition_day_name_from_index(stamp.getDay()),
+            " ",
+            String(stamp.getMonth() + 1),
+            "/",
+            String(stamp.getDate())
+        ].join("");
+    }
+
+    def start_of_week_ms(anchor_ms: int) -> int {
+        stamp = Reflect.construct(Date, [anchor_ms]);
+        stamp.setHours(0);
+        stamp.setMinutes(0);
+        stamp.setSeconds(0);
+        stamp.setMilliseconds(0);
+        offset = ((stamp.getDay() + 6) % 7);
+        stamp.setDate(stamp.getDate() - offset);
+        return parseInt(String(stamp.getTime()));
+    }
+
+    def blank_nutrition_day(anchor_ms: int) -> dict {
+        return {
+            "date_key": nutrition_date_key_from_ms(anchor_ms),
+            "day": nutrition_day_name_from_index(Reflect.construct(Date, [anchor_ms]).getDay()),
+            "label": nutrition_day_label_from_ms(anchor_ms),
+            "calories_consumed": 0.0,
+            "protein_consumed": 0.0,
+            "carbs_consumed": 0.0,
+            "fat_consumed": 0.0,
+            "entries": []
+        };
+    }
+
+    def build_nutrition_week(anchor_ms: int) -> list {
+        week_start_ms = start_of_week_ms(anchor_ms);
+        history: list = [];
+        for idx=0 to idx<7 by idx+=1 {
+            history = history.concat([blank_nutrition_day(week_start_ms + (idx * 86400000))]);
+        }
+        return history;
+    }
+
+    def looks_like_nutrition_day(raw: any) -> bool {
+        if not raw {
+            return false;
+        }
+        return String(raw.date_key or "").trim().length > 0;
+    }
+
+    def nutrition_history_ref(anchor_ms: int = 0) -> list {
+        normalized_anchor = (anchor_ms if anchor_ms > 0 else now_ms());
+        if not shared_state.nutrition_history or not is_listish(shared_state.nutrition_history) or shared_state.nutrition_history.length == 0 or not looks_like_nutrition_day(shared_state.nutrition_history[0]) {
+            shared_state.nutrition_history = build_nutrition_week(normalized_anchor);
+        }
+        return shared_state.nutrition_history;
+    }
+
+    def nutrition_targets_ref() -> dict {
+        if not shared_state.nutrition_targets {
+            shared_state.nutrition_targets = {};
+        }
+        return shared_state.nutrition_targets;
+    }
+
+    async def set_nutrition_state(history: list, selected_idx: int) -> None {
+        shared_state.nutrition_history = history;
+        shared_state.nutrition_selected_day_index = selected_idx;
+        if on_nutrition_change {
+            await on_nutrition_change({
+                "weekly_history": history,
+                "selected_day_index": selected_idx,
+                "macro_targets": nutrition_targets_ref()
+            });
+        }
+    }
+
+    async def record_recipe_nutrition(recipe: dict, made_at_ms: int) -> None {
+        anchor_ms = (made_at_ms if made_at_ms > 0 else now_ms());
+        history = nutrition_history_ref(anchor_ms).map(
+            lambda day_item: dict -> dict { return
+                {
+                    "date_key": String(day_item.date_key or ""),
+                    "day": String(day_item.day or ""),
+                    "label": String(day_item.label or ""),
+                    "calories_consumed": to_num(String(day_item.calories_consumed or "0"), 0.0),
+                    "protein_consumed": to_num(String(day_item.protein_consumed or "0"), 0.0),
+                    "carbs_consumed": to_num(String(day_item.carbs_consumed or "0"), 0.0),
+                    "fat_consumed": to_num(String(day_item.fat_consumed or "0"), 0.0),
+                    "entries": (day_item.entries if is_listish(day_item.entries) else [])
+                }; }
+        );
+
+        target_key = nutrition_date_key_from_ms(anchor_ms);
+        target_idx = history.findIndex(
+            lambda day_item: dict -> bool { return String(day_item.date_key or "") == target_key; }
+        );
+        if target_idx < 0 {
+            history = build_nutrition_week(anchor_ms);
+            target_idx = history.findIndex(
+                lambda day_item: dict -> bool { return String(day_item.date_key or "") == target_key; }
+            );
+        }
+        if target_idx < 0 {
+            target_idx = 0;
+        }
+
+        current_day = history[target_idx];
+        current_entries = (current_day.entries.slice() if is_listish(current_day.entries) else []);
+        current_entries = current_entries.concat([{
+            "recipe_id": String(recipe.recipe_id or ""),
+            "title": String(recipe.title or recipe.recipe_name or "Recipe"),
+            "calories": to_num(String(recipe.total_calories or "0"), 0.0),
+            "protein_g": to_num(String(recipe.total_protein_g or "0"), 0.0),
+            "carbs_g": to_num(String(recipe.total_carbs_g or "0"), 0.0),
+            "fat_g": to_num(String(recipe.total_fat_g or "0"), 0.0),
+            "meal_type": normalize_meal_type(recipe.meal_type, ""),
+            "made_at_ms": anchor_ms
+        }]);
+
+        history[target_idx] = {
+            "date_key": String(current_day.date_key or target_key),
+            "day": String(current_day.day or nutrition_day_name_from_index(Reflect.construct(Date, [anchor_ms]).getDay())),
+            "label": String(current_day.label or nutrition_day_label_from_ms(anchor_ms)),
+            "calories_consumed": round_two(to_num(String(current_day.calories_consumed or "0"), 0.0) + to_num(String(recipe.total_calories or "0"), 0.0)),
+            "protein_consumed": round_two(to_num(String(current_day.protein_consumed or "0"), 0.0) + to_num(String(recipe.total_protein_g or "0"), 0.0)),
+            "carbs_consumed": round_two(to_num(String(current_day.carbs_consumed or "0"), 0.0) + to_num(String(recipe.total_carbs_g or "0"), 0.0)),
+            "fat_consumed": round_two(to_num(String(current_day.fat_consumed or "0"), 0.0) + to_num(String(recipe.total_fat_g or "0"), 0.0)),
+            "entries": current_entries
+        };
+
+        await set_nutrition_state(history, target_idx);
     }
 
     def to_int(raw: any, fallback: int = 0) -> int {
@@ -567,6 +748,8 @@ def:pub RecipesTab(
             "favorite": (true if recipe.favorite else false),
             "made": (true if recipe.made else false),
             "made_at_ms": made_time_value(recipe),
+            "meal_type": normalize_meal_type(recipe.meal_type, ""),
+            "preference_encoding": String(recipe.preference_encoding or "").trim(),
             "notes": String(recipe.notes or "Generated from your profile + pantry"),
             "instructions": clone_recipe_instructions(recipe.instructions),
             "ingredients": clone_recipe_ingredients(recipe.ingredients)
@@ -930,7 +1113,37 @@ def:pub RecipesTab(
         return recipe_by_id(recipe_id);
     }
 
-    def history_entry_from_generated_recipe(recipe_id: str, made_at_ms: int = 0, made: bool = false) -> dict {
+    def generated_meal_choice() -> str {
+        history_entry = generated_recipe_history_entry();
+        if history_entry and Object.keys(history_entry).length > 0 and String(history_entry.meal_type or "").trim().length > 0 {
+            return normalize_meal_type(history_entry.meal_type);
+        }
+        return normalize_meal_type(generated_meal_type);
+    }
+
+    def meal_choice_for_recipe(recipe: dict) -> str {
+        recipe_id = recipe_lookup_key(recipe);
+        chosen = String(saved_meal_choices[recipe_id] or "").trim();
+        if chosen.length > 0 {
+            return normalize_meal_type(chosen);
+        }
+        saved_meal = String(recipe.meal_type or "").trim();
+        if saved_meal.length > 0 {
+            return normalize_meal_type(saved_meal);
+        }
+        return "dinner";
+    }
+
+    def set_saved_meal_choice(recipe_id: str, meal_type: str) -> None {
+        next_choices: dict = {};
+        for key in Object.keys(saved_meal_choices) {
+            next_choices[key] = saved_meal_choices[key];
+        }
+        next_choices[recipe_id] = normalize_meal_type(meal_type);
+        saved_meal_choices = next_choices;
+    }
+
+    def history_entry_from_generated_recipe(recipe_id: str, made_at_ms: int = 0, made: bool = false, meal_type: str = "") -> dict {
         return {
             "recipe_id": recipe_id,
             "title": String(generated_recipe.recipe_name or generated_recipe.title or "Generated Recipe"),
@@ -945,7 +1158,9 @@ def:pub RecipesTab(
             "favorite": false,
             "made": made,
             "made_at_ms": (made_at_ms if made else 0),
-            "notes": "Generated from your profile + pantry",
+            "meal_type": normalize_meal_type(meal_type, ""),
+            "preference_encoding": String(generated_recipe.preference_encoding or "").trim(),
+            "notes": current_recipe_notes(),
             "instructions": clone_recipe_instructions(generated_recipe.instructions),
             "ingredients": clone_recipe_ingredients(generated_recipe.ingredients)
         };
@@ -978,84 +1193,16 @@ def:pub RecipesTab(
         }
     }
 
-    def generate_new_recipe() -> None {
-        titles = [
-            "Chickpea Curry Wrap",
-            "Salmon Rice Crunch Bowl",
-            "High-Protein Pasta Bake",
-            "Spicy Lentil Taco Plate"
-        ];
-        styles = ["quick", "budget", "high-protein", "meal-prep"];
-
-        idx = 0;
-        rand_title = Math.random();
-        if rand_title >= 0.75 {
-            idx = 3;
-        } elif rand_title >= 0.5 {
-            idx = 2;
-        } elif rand_title >= 0.25 {
-            idx = 1;
-        }
-
-        style_idx = 0;
-        rand_style = Math.random();
-        if rand_style >= 0.75 {
-            style_idx = 3;
-        } elif rand_style >= 0.5 {
-            style_idx = 2;
-        } elif rand_style >= 0.25 {
-            style_idx = 1;
-        }
-        new_recipe_idea = {
-            "title": titles[idx],
-            "style": styles[style_idx],
-            "why": "Generated from your recent favorites and macro direction."
-        };
+    def current_recipe_title() -> str {
+        return String(generated_recipe.recipe_name or generated_recipe.title or "Recipe");
     }
 
-    async def add_pantry_item() -> None {
-        if not pantry_name.trim() {
-            status_text = "Pantry item name is required.";
-            return;
+    def current_recipe_notes() -> str {
+        notes_text = String(generated_recipe.notes or "").trim();
+        if notes_text.length > 0 {
+            return notes_text;
         }
-
-        await set_pantry_items(pantry_items_ref().concat([{
-            "name": pantry_name.trim(),
-            "quantity": to_num(pantry_quantity, 1.0),
-            "unit": pantry_unit,
-            "cost": to_num(pantry_cost, 0.0),
-            "protein": to_num(pantry_protein, 0.0),
-            "carb": to_num(pantry_carb, 0.0),
-            "fat": to_num(pantry_fat, 0.0),
-            "serving_size": ["1 ", pantry_unit].join(""),
-            "package_quantity": to_num(pantry_quantity, 1.0),
-            "package_unit": pantry_unit
-        }]));
-
-        pantry_name = "";
-        pantry_quantity = "1";
-        pantry_unit = "PIECE";
-        pantry_cost = "0";
-        pantry_protein = "0";
-        pantry_carb = "0";
-        pantry_fat = "0";
-        status_text = "Pantry ingredient added as per-serving storage.";
-    }
-
-    async def remove_pantry_item(name: str) -> None {
-        await set_pantry_items(
-            pantry_items_ref().filter(
-                lambda item: dict -> bool { return item.name != name; }
-            )
-        );
-    }
-
-    async def handle_remove_pantry_item_click(e: any) -> None {
-        item_name = event_attr(e, "data-item-name").trim();
-        if item_name == "" {
-            return;
-        }
-        await remove_pantry_item(item_name);
+        return ["Built as a ", meal_label(generated_meal_choice()).toLowerCase(), " recipe from your pantry and profile."].join("");
     }
 
     def next_pantry_after_recipe(recipe_ingredients: list) -> list {
@@ -1167,9 +1314,10 @@ def:pub RecipesTab(
         return val;
     }
 
-    async def complete_recipe_and_update_pantry(recipe: dict, clear_generated_after: bool = false) -> bool {
+    async def complete_recipe_and_update_pantry(recipe: dict, clear_generated_after: bool = false, meal_type: str = "") -> bool {
         recipe_id = recipe_lookup_key(recipe);
         recipe_ingredients = clone_recipe_ingredients(recipe.ingredients);
+        selected_meal_type = normalize_meal_type((meal_type if String(meal_type or "").trim().length > 0 else recipe.meal_type), "dinner");
         if recipe_id == "" {
             status_text = "Recipe is missing an id.";
             return false;
@@ -1184,6 +1332,7 @@ def:pub RecipesTab(
         previous_pantry = pantry_items_ref().slice();
         next_pantry = next_pantry_after_recipe(recipe_ingredients);
         pantry_match_note = "";
+        nutrition_note = "";
         made_at_ms = now_ms();
 
         try {
@@ -1195,19 +1344,19 @@ def:pub RecipesTab(
                 subtract_out = first_report_payload(subtract_result);
                 if subtract_out and subtract_out.ok and is_listish(subtract_out.updated_pantry) {
                     next_pantry = subtract_out.updated_pantry;
-                    pantry_match_note = String(subtract_out.notes or "");
                 } elif subtract_out and subtract_out.error {
-                    pantry_match_note = "Used direct pantry subtraction fallback: " + String(subtract_out.error);
+                    pantry_match_note = "Pantry quantities were updated with a backup match method.";
                 }
             } except Exception as subtract_e {
-                pantry_match_note = "Used direct pantry subtraction fallback: " + subtract_e.toString();
+                pantry_match_note = "Pantry quantities were updated with a backup match method.";
             }
 
             await set_pantry_items(next_pantry);
             result = root spawn MarkRecipeMade(
                 recipe_id=recipe_id,
                 made=True,
-                made_at_ms=made_at_ms
+                made_at_ms=made_at_ms,
+                meal_type=selected_meal_type
             );
             out = first_report_payload(result);
             if not out or out.updated == false {
@@ -1228,6 +1377,7 @@ def:pub RecipesTab(
             }
             updated_recipe.made = true;
             updated_recipe.made_at_ms = made_at_ms;
+            updated_recipe.meal_type = selected_meal_type;
             if clone_recipe_instructions(updated_recipe.instructions).length == 0 {
                 updated_recipe.instructions = clone_recipe_instructions(recipe.instructions);
             }
@@ -1248,6 +1398,12 @@ def:pub RecipesTab(
                 show_made_confirm = false;
             }
 
+            try {
+                await record_recipe_nutrition(updated_recipe, made_at_ms);
+            } except Exception as nutrition_e {
+                nutrition_note = "Nutrition progress could not be updated right now.";
+                maybe_trigger_auth_error(nutrition_e.toString());
+            }
             pending_rate_recipe_id = recipe_id;
             expanded_recipe_id = recipe_id;
             filter_mode = "history";
@@ -1256,8 +1412,12 @@ def:pub RecipesTab(
                 if recipe.made
                 else "Recipe added to Past Recipes, pantry updated, and rating prompt is ready below."
             );
+            status_text = [status_text, " Logged as ", meal_label(selected_meal_type), "."].join("");
             if pantry_match_note.trim().length > 0 {
                 status_text = [status_text, " ", pantry_match_note].join("");
+            }
+            if nutrition_note.trim().length > 0 {
+                status_text = [status_text, " ", nutrition_note].join("");
             }
             loading = false;
             return true;
@@ -1273,6 +1433,7 @@ def:pub RecipesTab(
 
     async def mark_generated_recipe_made() -> None {
         recipe_id = String(generated_recipe.recipe_id or "");
+        selected_meal_type = generated_meal_choice();
         if recipe_id == "" {
             status_text = "Generate or load a recipe first.";
             return;
@@ -1295,9 +1456,10 @@ def:pub RecipesTab(
         completion_recipe = (
             clone_recipe(recipe)
             if recipe and Object.keys(recipe).length > 0
-            else history_entry_from_generated_recipe(recipe_id)
+            else history_entry_from_generated_recipe(recipe_id, 0, false, selected_meal_type)
         );
-        await complete_recipe_and_update_pantry(completion_recipe, true);
+        completion_recipe.meal_type = selected_meal_type;
+        await complete_recipe_and_update_pantry(completion_recipe, true, selected_meal_type);
     }
 
     async def generate_recipe_api() -> None {
@@ -1306,8 +1468,9 @@ def:pub RecipesTab(
             return;
         }
 
+        selected_meal_type = normalize_meal_type(generated_meal_type, "dinner");
         loading = true;
-        status_text = "Loading profile and generating recipe...";
+        status_text = ["Loading profile and generating a ", meal_label(selected_meal_type).toLowerCase(), " recipe..."].join("");
         try {
             profile_result = root spawn GetUserProfile();
             profile_out = first_report_payload(profile_result);
@@ -1334,7 +1497,8 @@ def:pub RecipesTab(
 
             recipe_result = root spawn GenerateRecipeFromPantry(
                 profile=profile_out,
-                pantry_ingredients=pantry_items_ref()
+                pantry_ingredients=pantry_items_ref(),
+                meal_type=selected_meal_type
             );
             recipe_out = first_report_payload(recipe_result);
             if recipe_out.ok == false {
@@ -1346,10 +1510,11 @@ def:pub RecipesTab(
             }
 
             generated_recipe = recipe_out;
+            generated_meal_type = normalize_meal_type(recipe_out.meal_type, selected_meal_type);
             show_made_confirm = false;
             await load_recipe_history_api(True);
 
-            status_text = "Recipe generated with API.";
+            status_text = [meal_label(generated_meal_type), " recipe is ready."].join("");
         } except Exception as e {
             err_text = e.toString();
             status_text = "Recipe generation failed: " + err_text;
@@ -1652,7 +1817,10 @@ def:pub RecipesTab(
             return;
         }
         expanded_recipe_id = recipe_id;
-        await complete_recipe_and_update_pantry(clone_recipe(recipe));
+        selected_meal_type = meal_choice_for_recipe(recipe);
+        recipe_copy = clone_recipe(recipe);
+        recipe_copy.meal_type = selected_meal_type;
+        await complete_recipe_and_update_pantry(recipe_copy, false, selected_meal_type);
     }
 
     async def handle_saved_recipe_make_click(e: any) -> None {
@@ -1665,15 +1833,16 @@ def:pub RecipesTab(
 
     async def load_saved_recipe_api() -> None {
         loading = true;
-        status_text = "Loading saved recipe...";
+        status_text = "Loading your latest recipe...";
         try {
             result = root spawn ListGeneratedRecipe();
             out = first_report_payload(result);
             if out and out.recipe_name and String(out.recipe_name).trim().length > 0 {
                 generated_recipe = out;
+                generated_meal_type = normalize_meal_type(out.meal_type, generated_meal_type);
                 show_made_confirm = false;
                 await load_saved_macro_needs();
-                status_text = "Loaded saved recipe from backend.";
+                status_text = "Loaded your latest saved recipe.";
             } else {
                 generated_recipe = {};
                 show_made_confirm = false;
@@ -1689,12 +1858,12 @@ def:pub RecipesTab(
 
     async def clear_saved_recipe_api() -> None {
         loading = true;
-        status_text = "Clearing recipe...";
+        status_text = "Clearing the current recipe...";
         try {
             root spawn ClearGeneratedRecipe();
             generated_recipe = {};
             show_made_confirm = false;
-            status_text = "Saved recipe cleared.";
+            status_text = "Cleared the current recipe.";
         } except Exception as e {
             err_text = e.toString();
             status_text = "Clear failed: " + err_text;
@@ -1709,149 +1878,86 @@ def:pub RecipesTab(
     }
 
     return
-        <div
-            style={{
-                "background": "#ffffffde",
-                "border": "1px solid #d2e3f5",
-                "borderRadius": "18px",
-                "padding": "18px",
-                "display": "grid",
-                "gap": "14px"
-            }}
-        >
-            <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "10px", "flexWrap": "wrap"}}>
-                <div>
-                    <h2 style={{"margin": "0"}}>Recipes</h2>
-                    <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                        API-wired generation using your saved profile, pantry, and macro needs.
-                    </p>
+        <div className="card cr-module-shell" style={{"display": "grid", "gap": "14px"}}>
+            <div style={{"display": "grid", "gap": "10px"}}>
+                <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "flex-end", "gap": "12px", "flexWrap": "wrap"}}>
+                    <div>
+                        <h2 style={{"margin": "0"}}>Recipes</h2>
+                        <p style={{"margin": "6px 0 0 0", "opacity": "0.78", "lineHeight": "1.45"}}>
+                            Build meals from the ingredients you already have on hand, then save the ones worth making again.
+                        </p>
+                    </div>
+                    <div style={{"display": "flex", "gap": "8px", "alignItems": "end", "flexWrap": "wrap"}}>
+                        <div className="form-group" style={{"minWidth": "180px", "marginBottom": "0"}}>
+                            <label className="form-label">Meal To Make</label>
+                            <select value={normalize_meal_type(generated_meal_type)} onChange={lambda e: any -> None { generated_meal_type = normalize_meal_type(e.target.value); }}>
+                                <option value="breakfast">Breakfast</option>
+                                <option value="lunch">Lunch</option>
+                                <option value="dinner">Dinner</option>
+                                <option value="snack">Snack</option>
+                            </select>
+                        </div>
+                        <button onClick={generate_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}>Create Recipe</button>
+                        <button onClick={load_saved_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#eff6ff", "fontWeight": "700"}}>Load Latest</button>
+                        <button onClick={clear_saved_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #991b1b", "background": "#fee2e2", "fontWeight": "700"}}>Clear Current</button>
+                    </div>
                 </div>
-                <button onClick={generate_new_recipe} style={{"padding": "9px 12px", "borderRadius": "10px", "border": "1px solid #92400e", "background": "#fef3c7", "fontWeight": "700"}}>
-                    Generate New Recipe Idea
-                </button>
-            </div>
 
-            <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
-                {[( "Working... " if loading else "Ready. " ), status_text].join("")}
-            </div>
-
-            <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
-                <button onClick={generate_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}>Generate Recipe (API)</button>
-                <button onClick={load_saved_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #1d4ed8", "background": "#eff6ff", "fontWeight": "700"}}>Load Saved Recipe (API)</button>
-                <button onClick={clear_saved_recipe_api} style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid #991b1b", "background": "#fee2e2", "fontWeight": "700"}}>Clear Saved Recipe (API)</button>
+                <div className="cr-status info">
+                    {[( "Working... " if loading else "Ready. " ), status_text].join("")}
+                </div>
             </div>
 
             <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))", "gap": "12px"}}>
                 <div style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff", "display": "grid", "gap": "10px"}}>
-                    <h3 style={{"margin": "0"}}>Pantry Inputs For Recipe API</h3>
-                    <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(110px, 1fr))", "gap": "8px", "alignItems": "end"}}>
-                        <input
-                            value={pantry_name}
-                            onChange={lambda e: any -> None { pantry_name = e.target.value; }}
-                            placeholder="name"
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px", "gridColumn": "span 2"}}
-                        />
-                        <input
-                            value={pantry_quantity}
-                            onChange={lambda e: any -> None { pantry_quantity = e.target.value; }}
-                            placeholder="qty"
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
-                        />
-                        <select
-                            value={pantry_unit}
-                            onChange={lambda e: any -> None { pantry_unit = e.target.value; }}
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
-                        >
-                            <option value="PIECE">PIECE</option>
-                            <option value="LB">LB</option>
-                            <option value="OZ">OZ</option>
-                            <option value="CUP">CUP</option>
-                            <option value="TBSP">TBSP</option>
-                            <option value="TSP">TSP</option>
-                            <option value="CLOVE">CLOVE</option>
-                            <option value="BUNCH">BUNCH</option>
-                        </select>
-                        <input
-                            value={pantry_cost}
-                            onChange={lambda e: any -> None { pantry_cost = e.target.value; }}
-                            placeholder="cost/serv"
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
-                        />
-                        <input
-                            value={pantry_protein}
-                            onChange={lambda e: any -> None { pantry_protein = e.target.value; }}
-                            placeholder="protein/serv"
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
-                        />
-                        <input
-                            value={pantry_carb}
-                            onChange={lambda e: any -> None { pantry_carb = e.target.value; }}
-                            placeholder="carb/serv"
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
-                        />
-                        <input
-                            value={pantry_fat}
-                            onChange={lambda e: any -> None { pantry_fat = e.target.value; }}
-                            placeholder="fat/serv"
-                            style={{"padding": "8px", "border": "1px solid #cbd5e1", "borderRadius": "8px"}}
-                        />
-                        <button
-                            onClick={add_pantry_item}
-                            style={{"padding": "8px", "borderRadius": "8px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}
-                        >
-                            Add
-                        </button>
+                    <div style={{"display": "grid", "gap": "4px"}}>
+                        <h3 style={{"margin": "0"}}>Pantry Snapshot</h3>
+                        <div style={{"opacity": "0.78", "lineHeight": "1.45"}}>
+                            Recipe generation uses the groceries already saved in your pantry. Update items from the pantry or receipt flow when this list changes.
+                        </div>
                     </div>
 
                     {(
-                        <div style={{"opacity": "0.75"}}>No pantry items yet.</div>
+                        <div style={{"opacity": "0.75", "lineHeight": "1.45"}}>
+                            No pantry items yet. Add groceries in the pantry or receipt flow first.
+                        </div>
                     ) if pantry_items_ref().length == 0 else (
-                        <div style={{"overflowX": "auto"}}>
-                            <table style={{"width": "100%", "borderCollapse": "collapse"}}>
-                                <thead>
-                                    <tr style={{"background": "#eff6ff"}}>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Name</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Total Qty</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Total Unit</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Serving Size</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Cost/Serv</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>P/Serv</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>C/Serv</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>F/Serv</th>
-                                        <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {pantry_items_ref().map(
-                                        lambda item: dict -> JsxElement { return
-                                            <tr key={item.name} style={{"borderTop": "1px solid #e2e8f0"}}>
-                                                <td style={{"padding": "8px"}}>{item.name}</td>
-                                                <td style={{"padding": "8px"}}>{total_quantity_value(item)}</td>
-                                                <td style={{"padding": "8px"}}>{total_quantity_unit(item)}</td>
-                                                <td style={{"padding": "8px"}}>{serving_size_display(item)}</td>
-                                                <td style={{"padding": "8px"}}>{item.cost}</td>
-                                                <td style={{"padding": "8px"}}>{item.protein}</td>
-                                                <td style={{"padding": "8px"}}>{item.carb}</td>
-                                                <td style={{"padding": "8px"}}>{item.fat}</td>
-                                                <td style={{"padding": "8px"}}>
-                                                    <button
-                                                        data-item-name={String(item.name or "")}
-                                                        onClick={handle_remove_pantry_item_click}
-                                                        style={{"padding": "6px 8px", "borderRadius": "8px", "border": "1px solid #991b1b", "background": "#fee2e2"}}
-                                                    >
-                                                        Remove
-                                                    </button>
-                                                </td>
-                                            </tr>; }
-                                    )}
-                                </tbody>
-                            </table>
+                        <div style={{"display": "grid", "gap": "8px"}}>
+                            <div style={{"fontSize": "0.9rem", "opacity": "0.72"}}>
+                                {String(pantry_items_ref().length)} items available for recipe generation
+                            </div>
+                            <div style={{"overflowX": "auto"}}>
+                                <table style={{"width": "100%", "borderCollapse": "collapse"}}>
+                                    <thead>
+                                        <tr style={{"background": "#eff6ff"}}>
+                                            <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Item</th>
+                                            <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>On Hand</th>
+                                            <th style={{"textAlign": "left", "padding": "8px", "fontSize": "0.85rem"}}>Serving Size</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {pantry_items_ref().map(
+                                            lambda item: dict -> JsxElement { return
+                                                <tr key={item.name} style={{"borderTop": "1px solid #e2e8f0"}}>
+                                                    <td style={{"padding": "8px"}}>{item.name}</td>
+                                                    <td style={{"padding": "8px"}}>{[String(total_quantity_value(item)), " ", total_quantity_unit(item)].join("")}</td>
+                                                    <td style={{"padding": "8px"}}>{serving_size_display(item)}</td>
+                                                </tr>; }
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     )}
                 </div>
 
-                <div style={{"border": "1px solid #dbeafe", "borderRadius": "12px", "padding": "12px", "background": "#eff6ff"}}>
-                    <h3 style={{"margin": "0 0 8px 0"}}>Macro Need Fit</h3>
+                <div style={{"border": "1px solid #dbeafe", "borderRadius": "12px", "padding": "12px", "background": "#eff6ff", "display": "grid", "gap": "10px"}}>
+                    <div style={{"display": "grid", "gap": "4px"}}>
+                        <h3 style={{"margin": "0"}}>Macro Fit</h3>
+                        <div style={{"opacity": "0.78", "lineHeight": "1.45"}}>
+                            Once a recipe is ready, compare it with your daily targets here.
+                        </div>
+                    </div>
                     {(
                         <div style={{"display": "grid", "gap": "8px"}}>
                             <div><b>Calories:</b> {generated_recipe.total_calories} / {macro_needs.calories_per_day}</div>
@@ -1860,32 +1966,99 @@ def:pub RecipesTab(
                             <div><b>Fat:</b> {generated_recipe.total_fat_g} / {macro_needs.fat_g} g ({String(macro_ratio(parseFloat(String(generated_recipe.total_fat_g or 0)), parseFloat(String(macro_needs.fat_g or 0))))}%)</div>
                         </div>
                     ) if (Object.keys(generated_recipe).length > 0 and Object.keys(macro_needs).length > 0) else (
-                        <div style={{"opacity": "0.75"}}>Generate a recipe to see macro fit against your needs.</div>
+                        <div style={{"opacity": "0.75"}}>Generate or load a recipe to compare it against your targets.</div>
                     )}
                 </div>
             </div>
 
-            <div style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff"}}>
-                <h3 style={{"margin": "0 0 8px 0"}}>Generated Recipe (API)</h3>
-                    <pre style={{"margin": "0", "background": "#0f172a", "color": "#e2e8f0", "borderRadius": "10px", "padding": "10px", "overflowX": "auto"}}>{JSON.stringify(generated_recipe, None, 2)}</pre>
+            <div style={{"border": "1px solid #e2e8f0", "borderRadius": "12px", "padding": "12px", "background": "#fcfdff", "display": "grid", "gap": "12px"}}>
+                <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "gap": "10px", "flexWrap": "wrap"}}>
+                    <div>
+                        <h3 style={{"margin": "0"}}>Current Recipe</h3>
+                        <div style={{"marginTop": "6px", "opacity": "0.78", "lineHeight": "1.45"}}>
+                            {("Review the ingredients and directions before you cook." if Object.keys(generated_recipe).length > 0 else "Generate or load a recipe to see it here.")}
+                        </div>
+                    </div>
                     {(
-                        <ol>
-                            {generated_recipe.instructions.map(
-                                lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
-                            )}
-                        </ol>
-                    ) if (generated_recipe and generated_recipe.instructions and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else <div /> }
-                    {(
-                        <div style={{"display": "grid", "gap": "8px", "marginTop": "10px", "padding": "10px", "borderRadius": "12px", "border": "1px solid #dbeafe", "background": "#eff6ff"}}>
+                        <span style={{"padding": "5px 10px", "borderRadius": "999px", "border": "1px solid #bfdbfe", "background": "#eff6ff", "color": "#1d4ed8", "fontWeight": "800"}}>
+                            Saved Recipe
+                        </span>
+                    ) if String(generated_recipe.recipe_id or "").trim().length > 0 else None}
+                </div>
+
+                {(
+                    <div style={{"opacity": "0.75", "lineHeight": "1.45"}}>
+                        Your next recipe will appear here with a clean ingredient list, directions, and a quick pantry update option once you make it.
+                    </div>
+                ) if Object.keys(generated_recipe).length == 0 else (
+                    <div style={{"display": "grid", "gap": "12px"}}>
+                        <div style={{"display": "grid", "gap": "8px"}}>
+                            <div style={{"fontSize": "1.3rem", "fontWeight": "800"}}>{current_recipe_title()}</div>
+                            <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap", "fontSize": "0.92rem", "opacity": "0.82"}}>
+                                {(
+                                    <span style={{"padding": "5px 10px", "borderRadius": "999px", "border": "1px solid #bfdbfe", "background": "#eff6ff", "color": "#1d4ed8", "fontWeight": "800", "opacity": "1"}}>
+                                        {meal_label(generated_meal_choice())}
+                                    </span>
+                                ) if generated_meal_choice() != "" else None}
+                                <span>{String(generated_recipe.total_calories or 0)} cal</span>
+                                <span>{String(generated_recipe.total_protein_g or 0)} g protein</span>
+                                <span>{String(generated_recipe.total_carbs_g or 0)} g carbs</span>
+                                <span>{String(generated_recipe.total_fat_g or 0)} g fat</span>
+                            </div>
+                            {(
+                                <div style={{"fontSize": "0.95rem", "lineHeight": "1.5", "opacity": "0.8"}}>
+                                    {current_recipe_notes()}
+                                </div>
+                            ) if current_recipe_notes().length > 0 else None}
+                        </div>
+
+                        <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(260px, 1fr))", "gap": "12px"}}>
+                            <div style={{"display": "grid", "gap": "8px", "padding": "12px", "borderRadius": "12px", "border": "1px solid #dbeafe", "background": "#eff6ff"}}>
+                                <div style={{"fontWeight": "800"}}>Ingredients</div>
+                                {(
+                                    <div style={{"display": "grid", "gap": "6px"}}>
+                                        {generated_recipe.ingredients.map(
+                                            lambda item: dict -> JsxElement { return
+                                                <div key={[item.name, item.quantity, item.unit].join("-")} style={{"display": "flex", "justifyContent": "space-between", "gap": "8px", "padding": "8px 10px", "border": "1px solid #bfdbfe", "borderRadius": "10px", "background": "#ffffff"}}>
+                                                    <span>{item.name}</span>
+                                                    <span>{[String(item.quantity or 0), " ", norm_unit(item.unit)].join("")}</span>
+                                                </div>; }
+                                        )}
+                                    </div>
+                                ) if (generated_recipe.ingredients and is_listish(generated_recipe.ingredients) and generated_recipe.ingredients.length > 0) else (
+                                    <div style={{"opacity": "0.75"}}>Ingredient details are not available for this recipe yet.</div>
+                                )}
+                            </div>
+
+                            <div style={{"display": "grid", "gap": "8px", "padding": "12px", "borderRadius": "12px", "border": "1px solid #dbeafe", "background": "#eff6ff"}}>
+                                <div style={{"fontWeight": "800"}}>Directions</div>
+                                {(
+                                    <ol style={{"margin": "0", "paddingLeft": "20px", "display": "grid", "gap": "6px"}}>
+                                        {generated_recipe.instructions.map(
+                                            lambda step: str -> JsxElement { return <li key={step}>{step}</li>; }
+                                        )}
+                                    </ol>
+                                ) if (generated_recipe.instructions and is_listish(generated_recipe.instructions) and generated_recipe.instructions.length > 0) else (
+                                    <div style={{"opacity": "0.75"}}>Directions are not available for this recipe yet.</div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div style={{"display": "grid", "gap": "8px", "padding": "10px", "borderRadius": "12px", "border": "1px solid #dbeafe", "background": "#eff6ff"}}>
                             <div style={{"fontWeight": "800"}}>Made This Recipe?</div>
                             <div style={{"fontSize": "0.92rem", "lineHeight": "1.45"}}>
-                                If yes, CaloReceipt will remove the used ingredients from your pantry, move the recipe into Past Recipes, and then ask you to rate it.
+                                Mark it as made after you cook it and CaloReceipt will update your pantry, move it into Past Recipes, and ask for a rating.
                             </div>
                             {(
                                 <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"}}>
                                     <span style={{"padding": "5px 10px", "borderRadius": "999px", "border": "1px solid #86efac", "background": "#dcfce7", "color": "#166534", "fontWeight": "800"}}>
                                         Added To Past Recipes
                                     </span>
+                                    {(
+                                        <span style={{"padding": "5px 10px", "borderRadius": "999px", "border": "1px solid #bfdbfe", "background": "#eff6ff", "color": "#1d4ed8", "fontWeight": "800"}}>
+                                            {meal_label(generated_recipe_history_entry().meal_type)}
+                                        </span>
+                                    ) if String(generated_recipe_history_entry().meal_type or "").trim().length > 0 else None}
                                     <span style={{"fontSize": "0.88rem", "opacity": "0.76"}}>
                                         Made: {format_made_time(generated_recipe_history_entry())}
                                     </span>
@@ -1901,6 +2074,15 @@ def:pub RecipesTab(
                                     <div style={{"fontSize": "0.9rem", "lineHeight": "1.45"}}>
                                         Use this only after you actually made the recipe. We will subtract the listed ingredients from your pantry and send the recipe to Past Recipes.
                                     </div>
+                                    <div className="form-group" style={{"maxWidth": "240px"}}>
+                                        <label className="form-label">Meal</label>
+                                        <select value={generated_meal_choice()} onChange={lambda e: any -> None { generated_meal_type = normalize_meal_type(e.target.value); }}>
+                                            <option value="breakfast">Breakfast</option>
+                                            <option value="lunch">Lunch</option>
+                                            <option value="dinner">Dinner</option>
+                                            <option value="snack">Snack</option>
+                                        </select>
+                                    </div>
                                     <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
                                         <button onClick={mark_generated_recipe_made} disabled={loading} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "800", "opacity": ("0.7" if loading else "1")}}>
                                             Yes, Update Pantry And Continue
@@ -1912,8 +2094,9 @@ def:pub RecipesTab(
                                 </div>
                             ) if show_made_confirm else None}
                         </div>
-                    ) if Object.keys(generated_recipe).length > 0 else <div />}
-                </div>
+                    </div>
+                )}
+            </div>
 
             <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
                 <button onClick={lambda -> None { filter_mode = "all"; }} style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": ("#dbeafe" if filter_mode == "all" else "#ffffff")}}>All</button>
@@ -1922,17 +2105,8 @@ def:pub RecipesTab(
             </div>
 
             <div style={{"padding": "10px 12px", "border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "12px", "fontSize": "0.94rem", "lineHeight": "1.5"}}>
-                Rank each recipe by picking a tier first, then compare it against the middle recipe in that tier until the binary-search flow finds its slot. Scores are recalculated on a `1.0-10.0` scale inside each tier.
+                After you cook a recipe, rate it so future picks improve. Choose a tier first, then compare it against one recipe at a time until we place it in the right spot.
             </div>
-
-            {(
-                <div style={{"padding": "10px", "border": "1px solid #fed7aa", "background": "#fff7ed", "borderRadius": "12px"}}>
-                    <h3 style={{"margin": "0 0 6px 0"}}>New Recipe Suggestion</h3>
-                    <div><b>{new_recipe_idea.title}</b></div>
-                    <div>Style: {new_recipe_idea.style}</div>
-                    <div style={{"opacity": "0.76"}}>{new_recipe_idea.why}</div>
-                </div>
-            ) if Object.keys(new_recipe_idea).length > 0 else <div />}
 
             <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(250px, 1fr))", "gap": "10px"}}>
                 {(
@@ -1967,6 +2141,11 @@ def:pub RecipesTab(
                                         </span>
                                     ) if recipe.made else None}
                                     {(
+                                        <span style={{"padding": "4px 9px", "borderRadius": "999px", "border": "1px solid #bfdbfe", "background": "#eff6ff", "color": "#1d4ed8", "fontWeight": "800"}}>
+                                            {meal_label(recipe.meal_type)}
+                                        </span>
+                                    ) if (recipe.made and String(recipe.meal_type or "").trim().length > 0) else None}
+                                    {(
                                         <span>Made: {format_made_time(recipe)}</span>
                                     ) if recipe.made else None}
                                 </div>
@@ -1974,14 +2153,29 @@ def:pub RecipesTab(
                                     <div style={{"display": "grid", "gap": "10px", "padding": "12px", "border": "1px solid #bfdbfe", "borderRadius": "12px", "background": "#eff6ff"}}>
                                         <div style={{"display": "flex", "justifyContent": "space-between", "gap": "10px", "alignItems": "center", "flexWrap": "wrap"}}>
                                             <div style={{"fontWeight": "800"}}>Directions</div>
-                                            <button
-                                                data-recipe-id={recipe_lookup_key(recipe)}
-                                                onClick={handle_saved_recipe_make_click}
-                                                disabled={loading}
-                                                style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "800", "opacity": ("0.7" if loading else "1")}}
-                                            >
-                                                {("Make Again And Update Pantry" if recipe.made else "Make Recipe And Update Pantry")}
-                                            </button>
+                                            <div style={{"display": "flex", "gap": "8px", "alignItems": "end", "flexWrap": "wrap"}}>
+                                                <div className="form-group" style={{"minWidth": "170px", "marginBottom": "0"}}>
+                                                    <label className="form-label">Meal</label>
+                                                    <select
+                                                        data-recipe-id={recipe_lookup_key(recipe)}
+                                                        value={meal_choice_for_recipe(recipe)}
+                                                        onChange={lambda e: any -> None { set_saved_meal_choice(recipe_lookup_key(recipe), e.target.value); }}
+                                                    >
+                                                        <option value="breakfast">Breakfast</option>
+                                                        <option value="lunch">Lunch</option>
+                                                        <option value="dinner">Dinner</option>
+                                                        <option value="snack">Snack</option>
+                                                    </select>
+                                                </div>
+                                                <button
+                                                    data-recipe-id={recipe_lookup_key(recipe)}
+                                                    onClick={handle_saved_recipe_make_click}
+                                                    disabled={loading}
+                                                    style={{"padding": "8px 10px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "800", "opacity": ("0.7" if loading else "1")}}
+                                                >
+                                                    {("Make Again And Update Pantry" if recipe.made else "Make Recipe And Update Pantry")}
+                                                </button>
+                                            </div>
                                         </div>
                                         {(
                                             <ol style={{"margin": "0", "paddingLeft": "20px", "display": "grid", "gap": "6px"}}>
@@ -2069,20 +2263,20 @@ def:pub RecipesTab(
                                     )}
                                     {(
                                         <div style={{"display": "grid", "gap": "8px", "padding": "10px", "borderRadius": "10px", "border": "1px solid #bfdbfe", "background": "#eff6ff"}}>
-                                            <div style={{"fontWeight": "800"}}>Binary Placement: {tier_label(active_rank_tier)}</div>
+                                            <div style={{"fontWeight": "800"}}>Compare Recipes: {tier_label(active_rank_tier)}</div>
                                             <div style={{"fontSize": "0.92rem", "lineHeight": "1.45"}}>
-                                                Compare this recipe with the middle recipe in the selected tier. Each answer cuts the remaining search range down until the exact slot is found.
+                                                Pick the recipe you liked more. We will use a few quick comparisons to place this recipe in the selected tier.
                                             </div>
                                             <div style={{"display": "grid", "gridTemplateColumns": "1fr auto 1fr", "gap": "8px", "alignItems": "center"}}>
                                                 <div style={{"padding": "9px", "borderRadius": "10px", "border": "1px solid #86efac", "background": "#f0fdf4"}}>
                                                     <div style={{"fontWeight": "800"}}>{recipe.title}</div>
-                                                    <div style={{"opacity": "0.74", "fontSize": "0.88rem"}}>New placement candidate</div>
+                                                    <div style={{"opacity": "0.74", "fontSize": "0.88rem"}}>Recipe you are rating</div>
                                                 </div>
                                                 <div style={{"fontWeight": "800", "opacity": "0.66"}}>vs</div>
                                                 <div style={{"padding": "9px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#ffffff"}}>
                                                     <div style={{"fontWeight": "800"}}>{current_rank_comparison().title}</div>
                                                     <div style={{"opacity": "0.74", "fontSize": "0.88rem"}}>
-                                                        Current score: {rating_display_text(current_rank_comparison())}
+                                                        Current placement: {rating_display_text(current_rank_comparison())}
                                                     </div>
                                                 </div>
                                             </div>

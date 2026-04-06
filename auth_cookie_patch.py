@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import errno
 from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import urlparse
@@ -93,6 +94,18 @@ def _cookie_token_from_header(cookie_header: str | None) -> str | None:
     return token or None
 
 
+def _is_client_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in {
+            errno.EPIPE,
+            errno.ECONNRESET,
+            errno.ECONNABORTED,
+        }
+    return False
+
+
 def _patched_http_send(self: HTTPTransport, data: object) -> None:
     if not isinstance(data, TransportResponse):
         _ORIG_HTTP_SEND(self, data)
@@ -135,23 +148,30 @@ def _patched_http_send(self: HTTPTransport, data: object) -> None:
         if meta_dict:
             response_body["meta"] = meta_dict
 
-    self.handler.send_response(status)
-    self.handler.send_header("Content-Type", "application/json")
-    _apply_cors_headers(self.handler)
-    if set_auth_cookie:
-        self.handler.send_header("Set-Cookie", str(set_auth_cookie))
-    if clear_auth_cookie:
-        self.handler.send_header("Set-Cookie", str(clear_auth_cookie))
-    if isinstance(custom_headers, dict):
-        for key, value in custom_headers.items():
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    self.handler.send_header(str(key), str(item))
-            elif value is not None:
-                self.handler.send_header(str(key), str(value))
-    self.handler.end_headers()
-    self.handler.wfile.write(json.dumps(response_body).encode())
+    payload = json.dumps(response_body).encode()
     self.response_data = response_body
+    try:
+        self.handler.send_response(status)
+        self.handler.send_header("Content-Type", "application/json")
+        self.handler.send_header("Content-Length", str(len(payload)))
+        _apply_cors_headers(self.handler)
+        if set_auth_cookie:
+            self.handler.send_header("Set-Cookie", str(set_auth_cookie))
+        if clear_auth_cookie:
+            self.handler.send_header("Set-Cookie", str(clear_auth_cookie))
+        if isinstance(custom_headers, dict):
+            for key, value in custom_headers.items():
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        self.handler.send_header(str(key), str(item))
+                elif value is not None:
+                    self.handler.send_header(str(key), str(value))
+        self.handler.end_headers()
+        self.handler.wfile.write(payload)
+    except OSError as exc:
+        if not _is_client_disconnect(exc):
+            raise
+        return
     if self.on_message:
         self.on_message(data)
 

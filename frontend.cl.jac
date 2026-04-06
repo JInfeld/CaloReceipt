@@ -1,3 +1,4 @@
+import "./styles.css";
 import from tab_receipt_upload { ReceiptUploadTab }
 import from tab_dashboard_ai { DashboardAiTab }
 import from tab_user_profile { UserProfileTab }
@@ -11,7 +12,8 @@ def:pub app() -> JsxElement {
     has app_state: dict = {
         "pantry_items": [],
         "nutrition_history": [],
-        "nutrition_selected_day_index": 0
+        "nutrition_selected_day_index": 0,
+        "nutrition_targets": {}
     };
     has is_logged_in: bool = false;
     has auth_email: str = "";
@@ -39,19 +41,6 @@ def:pub app() -> JsxElement {
         "apple": {"configured": false, "login_path": "/sso/apple/login", "register_path": "/sso/apple/register"}
     };
 
-    def tab_button_style(tab_id: str) -> dict {
-        is_active = active_tab == tab_id;
-        return {
-            "padding": "10px 14px",
-            "borderRadius": "999px",
-            "border": ("1px solid #10243f" if is_active else "1px solid #9cb5cf"),
-            "background": ("#10243f" if is_active else "#f7fbff"),
-            "color": ("#f7fbff" if is_active else "#10243f"),
-            "fontWeight": "700",
-            "letterSpacing": "0.01em"
-        };
-    }
-
     def is_valid_tab(tab_id: str) -> bool {
         return (
             tab_id == "receipt" or
@@ -70,16 +59,177 @@ def:pub app() -> JsxElement {
         active_tab = "receipt";
     }
 
-    def default_nutrition_history() -> list {
+    def tab_label(tab_id: str) -> str {
+        if tab_id == "receipt" {
+            return "Receipt Upload";
+        }
+        if tab_id == "dashboard" {
+            return "Dashboard";
+        }
+        if tab_id == "profile" {
+            return "User Profile";
+        }
+        if tab_id == "recipes" {
+            return "Recipes";
+        }
+        if tab_id == "nutrition" {
+            return "Nutrition";
+        }
+        return "Workspace";
+    }
+
+    def tab_summary(tab_id: str) -> str {
+        if tab_id == "receipt" {
+            return "Capture new grocery purchases and turn them into pantry inventory.";
+        }
+        if tab_id == "dashboard" {
+            return "Review macro targets, recent progress, and AI grocery guidance.";
+        }
+        if tab_id == "profile" {
+            return "Keep your body metrics, dietary rules, and goals current.";
+        }
+        if tab_id == "recipes" {
+            return "Generate meals from your pantry and rank the recipes you actually make.";
+        }
+        if tab_id == "nutrition" {
+            return "Track weekly macro completion and day-by-day trends.";
+        }
+        return "Five-tab workspace for intake, planning, profile, recipes, and nutrition history.";
+    }
+
+    def nav_link_class(tab_id: str) -> str {
+        return ("cr-nav-link active" if active_tab == tab_id else "cr-nav-link");
+    }
+
+    def auth_mode_button_class(mode: str) -> str {
+        return ("active" if auth_mode == mode else "");
+    }
+
+    def display_identity() -> str {
+        name = String(current_user_display or "").trim();
+        if name.length > 0 {
+            return name;
+        }
+        email_text = String(auth_email or "").trim();
+        if email_text.length > 0 {
+            return email_text;
+        }
+        return "CaloReceipt";
+    }
+
+    def user_initials() -> str {
+        source = display_identity().replace("@", " ").replace(".", " ").replace("_", " ").replace("-", " ");
+        words = source.split(" ").filter(
+            lambda word: str -> bool { return word.trim().length > 0; }
+        );
+        if words.length == 0 {
+            return "CR";
+        }
+        if words.length == 1 {
+            word = String(words[0] or "").trim();
+            if word.length >= 2 {
+                return word.slice(0, 2).toUpperCase();
+            }
+            return word.toUpperCase();
+        }
+        return [String(words[0]).charAt(0), String(words[1]).charAt(0)].join("").toUpperCase();
+    }
+
+    def greeting_name() -> str {
+        identity = display_identity();
+        first_part = identity.split("@")[0].split(" ")[0].trim();
+        if first_part.length > 0 {
+            return first_part;
+        }
+        return "there";
+    }
+
+    def greeting_text() -> str {
+        hour = Reflect.construct(Date, []).getHours();
+        prefix = "Good evening";
+        if hour < 12 {
+            prefix = "Good morning";
+        } elif hour < 17 {
+            prefix = "Good afternoon";
+        }
+        return [prefix, ", ", greeting_name()].join("");
+    }
+
+    def pad2(raw: any) -> str {
+        parsed = parseInt(String(raw or "0"));
+        if isNaN(parsed) or parsed < 0 {
+            parsed = 0;
+        }
+        return ["0", String(parsed)].join("").slice(-2);
+    }
+
+    def nutrition_day_name_from_index(day_idx: int) -> str {
+        names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        if day_idx < 0 or day_idx >= names.length {
+            return "Day";
+        }
+        return names[day_idx];
+    }
+
+    def nutrition_date_key(date_obj: any) -> str {
         return [
-            {"day": "Mon", "protein": 82, "carbs": 71, "fat": 66, "move": 74},
-            {"day": "Tue", "protein": 88, "carbs": 79, "fat": 70, "move": 81},
-            {"day": "Wed", "protein": 92, "carbs": 76, "fat": 68, "move": 79},
-            {"day": "Thu", "protein": 73, "carbs": 64, "fat": 58, "move": 62},
-            {"day": "Fri", "protein": 96, "carbs": 88, "fat": 77, "move": 91},
-            {"day": "Sat", "protein": 84, "carbs": 72, "fat": 71, "move": 86},
-            {"day": "Sun", "protein": 90, "carbs": 75, "fat": 73, "move": 84}
-        ];
+            String(date_obj.getFullYear()),
+            "-",
+            pad2(date_obj.getMonth() + 1),
+            "-",
+            pad2(date_obj.getDate())
+        ].join("");
+    }
+
+    def nutrition_day_label(date_obj: any) -> str {
+        return [
+            nutrition_day_name_from_index(date_obj.getDay()),
+            " ",
+            String(date_obj.getMonth() + 1),
+            "/",
+            String(date_obj.getDate())
+        ].join("");
+    }
+
+    def start_of_week_date(anchor_ms: any = None) -> any {
+        anchor_raw = parseInt(String(anchor_ms or "0"));
+        anchor_value = (
+            anchor_raw
+            if (not isNaN(anchor_raw) and anchor_raw > 0)
+            else parseInt(String(Reflect.construct(Date, []).getTime()))
+        );
+        start = Reflect.construct(Date, [anchor_value]);
+        start.setHours(0);
+        start.setMinutes(0);
+        start.setSeconds(0);
+        start.setMilliseconds(0);
+        offset = ((start.getDay() + 6) % 7);
+        start.setDate(start.getDate() - offset);
+        return start;
+    }
+
+    def empty_nutrition_day(date_obj: any) -> dict {
+        return {
+            "date_key": nutrition_date_key(date_obj),
+            "day": nutrition_day_name_from_index(date_obj.getDay()),
+            "label": nutrition_day_label(date_obj),
+            "calories_consumed": 0.0,
+            "protein_consumed": 0.0,
+            "carbs_consumed": 0.0,
+            "fat_consumed": 0.0,
+            "entries": []
+        };
+    }
+
+    def default_nutrition_history(anchor_ms: any = None) -> list {
+        week_start = start_of_week_date(anchor_ms);
+        history: list = [];
+        for idx=0 to idx<7 by idx+=1 {
+            day_date = Reflect.construct(Date, [week_start.getTime()]);
+            day_date.setDate(week_start.getDate() + idx);
+            history = history.concat([empty_nutrition_day(day_date)]);
+        }
+        return history;
     }
 
     def auth_error_text() -> str {
@@ -137,36 +287,24 @@ def:pub app() -> JsxElement {
 
     def route_transition_shell(title: str, message: str) -> JsxElement {
         return
-            <div
-                style={{
-                    "minHeight": "100vh",
-                    "background": "radial-gradient(circle at 5% 10%, #ffe5b4 0%, #ffe5b400 30%), radial-gradient(circle at 95% 0%, #b7d7ff 0%, #b7d7ff00 35%), linear-gradient(135deg, #f4f8ff 0%, #f6fffb 50%, #fff7ef 100%)",
-                    "fontFamily": "'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif",
-                    "color": "#10243f",
-                    "padding": "22px",
-                    "display": "grid",
-                    "placeItems": "center"
-                }}
-            >
-                <div
-                    style={{
-                        "width": "min(520px, 100%)",
-                        "background": "#ffffffde",
-                        "border": "1px solid #d2e3f5",
-                        "borderRadius": "18px",
-                        "padding": "20px",
-                        "display": "grid",
-                        "gap": "14px"
-                    }}
-                >
-                    <div>
-                        <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>{title}</h1>
-                        <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                            {message}
-                        </p>
-                    </div>
-                    <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
-                        {auth_error_text()}
+            <div className="cr-auth-page">
+                <div className="login-container">
+                    <div className="login-card cr-transition-card">
+                        <div className="login-header">
+                            <div className="login-logo">
+                                <div className="logo-icon">
+                                    <svg viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                    </svg>
+                                </div>
+                                <span>CaloReceipt</span>
+                            </div>
+                            <h1 className="login-title">{title}</h1>
+                            <p className="login-subtitle">{message}</p>
+                        </div>
+                        <div className="cr-status info">
+                            {auth_error_text()}
+                        </div>
                     </div>
                 </div>
             </div>;
@@ -305,11 +443,38 @@ def:pub app() -> JsxElement {
         return merged;
     }
 
+    def looks_like_saved_nutrition_day(raw: any) -> bool {
+        if not raw {
+            return false;
+        }
+        return String(raw.date_key or "").trim().length > 0;
+    }
+
     def as_nutrition_history(raw: any) -> list {
-        if is_listish(raw) and raw.length > 0 {
+        if is_listish(raw) and raw.length > 0 and looks_like_saved_nutrition_day(raw[0]) {
             return raw;
         }
         return default_nutrition_history();
+    }
+
+    def as_nutrition_targets(raw: any) -> dict {
+        if not raw {
+            return {};
+        }
+        calories = num_or_zero(raw.calories_per_day);
+        protein = num_or_zero(raw.protein_g);
+        carbs = num_or_zero(raw.carbs_g);
+        fat = num_or_zero(raw.fat_g);
+        if calories <= 0.0 and protein <= 0.0 and carbs <= 0.0 and fat <= 0.0 {
+            return {};
+        }
+        return {
+            "calories_per_day": calories,
+            "protein_g": protein,
+            "carbs_g": carbs,
+            "fat_g": fat,
+            "notes": String(raw.notes or "").trim()
+        };
     }
 
     def error_message(raw: any, fallback: str = "Unknown error.") -> str {
@@ -449,6 +614,130 @@ def:pub app() -> JsxElement {
             return false;
         }
         return true;
+    }
+
+    def round_macro_target(raw: any) -> float {
+        value = num_or_zero(raw);
+        return Math.round(value * 10.0) / 10.0;
+    }
+
+    def macro_activity_multiplier(raw_level: any) -> float {
+        level = normalized_profile_choice(raw_level);
+        if level == "SEDENTARY" {
+            return 1.2;
+        }
+        if level == "LIGHTLY_ACTIVE" {
+            return 1.375;
+        }
+        if level == "VERY_ACTIVE" {
+            return 1.725;
+        }
+        if level == "ATHLETE" {
+            return 1.9;
+        }
+        return 1.55;
+    }
+
+    def macro_sex_bmr_offset(raw_sex: any) -> float {
+        sex_val = normalized_profile_choice(raw_sex);
+        if sex_val == "FEMALE" {
+            return -161.0;
+        }
+        if sex_val == "OTHER" or sex_val == "PREFER_NOT_TO_SAY" {
+            return -78.0;
+        }
+        return 5.0;
+    }
+
+    def macro_goal_calorie_adjustment(raw_goal: any, tdee: float) -> float {
+        goal_val = normalized_profile_choice(raw_goal);
+        if goal_val == "FAT_LOSS" {
+            return -0.2 * tdee;
+        }
+        if goal_val == "LEAN_BULK" {
+            return 0.08 * tdee;
+        }
+        if goal_val == "MUSCLE_GAIN" {
+            return 0.12 * tdee;
+        }
+        if goal_val == "ENDURANCE_PERFORMANCE" {
+            return 0.1 * tdee;
+        }
+        return 0.0;
+    }
+
+    def macro_goal_protein_lb(raw_goal: any) -> float {
+        goal_val = normalized_profile_choice(raw_goal);
+        if goal_val == "ENDURANCE_PERFORMANCE" {
+            return 0.8;
+        }
+        if goal_val == "MAINTENANCE" {
+            return 0.9;
+        }
+        if goal_val == "LEAN_BULK" {
+            return 0.95;
+        }
+        return 1.0;
+    }
+
+    def macro_goal_fat_ratio(raw_goal: any) -> float {
+        goal_val = normalized_profile_choice(raw_goal);
+        if goal_val == "MUSCLE_GAIN" {
+            return 0.25;
+        }
+        if goal_val == "LEAN_BULK" {
+            return 0.28;
+        }
+        return 0.3;
+    }
+
+    def derived_macro_targets_from_profile(profile: dict = {}, source_note: str = "") -> dict {
+        if not profile_has_key_info(profile) {
+            return {};
+        }
+
+        age_num = parseInt(String(profile.age or "").trim());
+        height_in = parse_profile_num(String(profile.height or ""), -1.0);
+        weight_lb = parse_profile_num(String(profile.weight or ""), -1.0);
+        if isNaN(age_num) or age_num <= 0 or height_in <= 0.0 or weight_lb <= 0.0 {
+            return {};
+        }
+
+        weight_kg = weight_lb * 0.45359237;
+        height_cm = height_in * 2.54;
+        bmr = (10.0 * weight_kg) + (6.25 * height_cm) - (5.0 * age_num) + macro_sex_bmr_offset(profile.sex);
+        activity_multiplier = macro_activity_multiplier(profile.fitness_level);
+        tdee = bmr * activity_multiplier;
+        calories = tdee + macro_goal_calorie_adjustment(profile.goal, tdee);
+        if calories < 1200.0 {
+            calories = 1200.0;
+        }
+
+        protein_g = weight_lb * macro_goal_protein_lb(profile.goal);
+        fat_g = (calories * macro_goal_fat_ratio(profile.goal)) / 9.0;
+        carbs_g = (calories - (protein_g * 4.0) - (fat_g * 9.0)) / 4.0;
+        if carbs_g < 50.0 {
+            carbs_g = 50.0;
+            fat_g = (calories - (protein_g * 4.0) - (carbs_g * 4.0)) / 9.0;
+        }
+        if fat_g < 25.0 {
+            fat_g = 25.0;
+            carbs_g = (calories - (protein_g * 4.0) - (fat_g * 9.0)) / 4.0;
+        }
+
+        notes = "Targets reconstructed from your saved profile on refresh.";
+        source_text = String(source_note or "").trim();
+        if source_text.length > 0 {
+            notes = [notes, " ", source_text].join("");
+        }
+
+        return {
+            "calories_per_day": round_macro_target(calories),
+            "protein_g": round_macro_target(protein_g),
+            "carbs_g": round_macro_target(carbs_g),
+            "fat_g": round_macro_target(fat_g),
+            "notes": notes
+        };
     }
 
     def build_signup_profile_payload() -> dict {
@@ -722,7 +1011,8 @@ def:pub app() -> JsxElement {
                 history = as_nutrition_history(parsed.weekly_history);
                 return {
                     "weekly_history": history,
-                    "selected_day_index": safe_day_index(parsed.selected_day_index, history.length)
+                    "selected_day_index": safe_day_index(parsed.selected_day_index, history.length),
+                    "macro_targets": as_nutrition_targets(parsed.macro_targets)
                 };
             }
         } except Exception as _e {
@@ -730,7 +1020,8 @@ def:pub app() -> JsxElement {
         }
         return {
             "weekly_history": default_nutrition_history(),
-            "selected_day_index": 0
+            "selected_day_index": 0,
+            "macro_targets": {}
         };
     }
 
@@ -754,11 +1045,15 @@ def:pub app() -> JsxElement {
         }
     }
 
-    def save_cached_nutrition(weekly: list, idx: int) -> None {
+    def save_cached_nutrition(weekly: list, idx: int, macro_targets: dict = {}) -> None {
         try {
             localStorage.setItem(
                 cache_key("nutrition"),
-                JSON.stringify({"weekly_history": weekly, "selected_day_index": idx})
+                JSON.stringify({
+                    "weekly_history": weekly,
+                    "selected_day_index": idx,
+                    "macro_targets": macro_targets
+                })
             );
         } except Exception as _e {
             0;
@@ -781,14 +1076,16 @@ def:pub app() -> JsxElement {
         }
     }
 
-    def set_app_state(next_pantry: any, next_history: any, next_idx: any) -> None {
+    def set_app_state(next_pantry: any, next_history: any, next_idx: any, next_targets: any = {}) -> None {
         pantry_items = as_pantry_items(next_pantry);
         nutrition_history = as_nutrition_history(next_history);
         nutrition_selected_day_index = safe_day_index(next_idx, nutrition_history.length);
+        nutrition_targets = as_nutrition_targets(next_targets);
         app_state = {
             "pantry_items": pantry_items,
             "nutrition_history": nutrition_history,
-            "nutrition_selected_day_index": nutrition_selected_day_index
+            "nutrition_selected_day_index": nutrition_selected_day_index,
+            "nutrition_targets": nutrition_targets
         };
     }
 
@@ -797,12 +1094,13 @@ def:pub app() -> JsxElement {
         set_app_state(
             as_pantry_items(app_state.pantry_items),
             history,
-            safe_day_index(app_state.nutrition_selected_day_index, history.length)
+            safe_day_index(app_state.nutrition_selected_day_index, history.length),
+            as_nutrition_targets(app_state.nutrition_targets)
         );
     }
 
     def reset_local_user_state() -> None {
-        set_app_state([], default_nutrition_history(), 0);
+        set_app_state([], default_nutrition_history(), 0, {});
         current_user_display = "";
         requires_profile_setup = false;
         reset_pantry_save_state();
@@ -829,6 +1127,20 @@ def:pub app() -> JsxElement {
     def handle_profile_change(profile: dict = {}) -> None {
         set_current_user_display_from_profile(profile);
         requires_profile_setup = not profile_has_key_info(profile);
+        current_history = as_nutrition_history(app_state.nutrition_history);
+        current_idx = safe_day_index(app_state.nutrition_selected_day_index, current_history.length);
+        next_targets = as_nutrition_targets(app_state.nutrition_targets);
+        if Object.keys(next_targets).length == 0 and profile_has_any_data(profile) {
+            next_targets = load_cached_nutrition().macro_targets;
+        }
+        if Object.keys(next_targets).length == 0 and profile_has_key_info(profile) {
+            next_targets = derived_macro_targets_from_profile(profile);
+        }
+        if not profile_has_any_data(profile) {
+            next_targets = {};
+        }
+        set_app_state(as_pantry_items(app_state.pantry_items), current_history, current_idx, next_targets);
+        save_cached_nutrition(current_history, current_idx, next_targets);
     }
 
     def first_report_payload(raw_result: dict) -> dict {
@@ -880,6 +1192,7 @@ def:pub app() -> JsxElement {
             next_pantry = [];
             next_weekly = fallback_nutrition.weekly_history;
             next_idx = fallback_nutrition.selected_day_index;
+            next_targets = fallback_nutrition.macro_targets;
             has_profile = false;
             profile_payload = {};
             pantry_loaded = false;
@@ -900,15 +1213,15 @@ def:pub app() -> JsxElement {
             if nutrition_out and not nutrition_out.error and nutrition_out.weekly_history != None {
                 next_weekly = as_nutrition_history(nutrition_out.weekly_history);
                 next_idx = safe_day_index(nutrition_out.selected_day_index or 0, next_weekly.length);
-                save_cached_nutrition(next_weekly, next_idx);
+                next_targets = as_nutrition_targets(nutrition_out.macro_targets);
+                save_cached_nutrition(next_weekly, next_idx, next_targets);
                 nutrition_loaded = true;
             }
             if not nutrition_loaded {
                 next_weekly = fallback_nutrition.weekly_history;
                 next_idx = fallback_nutrition.selected_day_index;
+                next_targets = fallback_nutrition.macro_targets;
             }
-
-            set_app_state(next_pantry, next_weekly, next_idx);
 
             profile_out = await call_authenticated_walker("GetUserProfile");
             if profile_out and profile_out.error {
@@ -942,14 +1255,29 @@ def:pub app() -> JsxElement {
             } else {
                 set_current_user_display_from_profile({});
             }
+            if Object.keys(next_targets).length == 0 and profile_has_key_info(profile_payload) {
+                next_targets = derived_macro_targets_from_profile(profile_payload);
+                save_cached_nutrition(next_weekly, next_idx, next_targets);
+            }
+            set_app_state(next_pantry, next_weekly, next_idx, next_targets);
             return {"has_profile": has_profile, "profile": profile_payload};
         } except Exception as e {
             fallback_nutrition = load_cached_nutrition();
             fallback_profile = load_cached_profile();
+            fallback_targets = fallback_nutrition.macro_targets;
+            if Object.keys(fallback_targets).length == 0 and profile_has_key_info(fallback_profile) {
+                fallback_targets = derived_macro_targets_from_profile(fallback_profile);
+                save_cached_nutrition(
+                    fallback_nutrition.weekly_history,
+                    fallback_nutrition.selected_day_index,
+                    fallback_targets
+                );
+            }
             set_app_state(
                 load_cached_pantry(),
                 fallback_nutrition.weekly_history,
-                fallback_nutrition.selected_day_index
+                fallback_nutrition.selected_day_index,
+                fallback_targets
             );
             if profile_has_key_info(fallback_profile) {
                 set_current_user_display_from_profile(fallback_profile);
@@ -1008,7 +1336,7 @@ def:pub app() -> JsxElement {
         }
         save_cached_pantry(clean_items);
         nutrition_cache = load_cached_nutrition();
-        set_app_state(clean_items, nutrition_cache.weekly_history, nutrition_cache.selected_day_index);
+        set_app_state(clean_items, nutrition_cache.weekly_history, nutrition_cache.selected_day_index, nutrition_cache.macro_targets);
         pantry_state = pantry_save_state();
         if snapshot == pantry_state.last_saved_snapshot and not pantry_state.in_flight and not pantry_state.has_pending {
             return;
@@ -1069,16 +1397,18 @@ def:pub app() -> JsxElement {
     async def save_nutrition_state(payload: dict) -> None {
         weekly = as_nutrition_history(payload.weekly_history);
         idx = safe_day_index(payload.selected_day_index or 0, weekly.length);
+        targets = as_nutrition_targets(payload.macro_targets);
 
-        save_cached_nutrition(weekly, idx);
+        save_cached_nutrition(weekly, idx, targets);
         pantry_cache = load_cached_pantry();
-        set_app_state(pantry_cache, weekly, idx);
+        set_app_state(pantry_cache, weekly, idx, targets);
         try {
             out = await call_authenticated_walker(
                 "SaveNutritionState",
                 {
                     "selected_day_index": idx,
-                    "weekly_history": weekly
+                    "weekly_history": weekly,
+                    "macro_targets": targets
                 }
             );
             if out and out.error and is_auth_error_text(String(out.error)) {
@@ -1212,7 +1542,8 @@ def:pub app() -> JsxElement {
             set_app_state(
                 merged_items,
                 as_nutrition_history(app_state.nutrition_history),
-                safe_day_index(app_state.nutrition_selected_day_index, as_nutrition_history(app_state.nutrition_history).length)
+                safe_day_index(app_state.nutrition_selected_day_index, as_nutrition_history(app_state.nutrition_history).length),
+                as_nutrition_targets(app_state.nutrition_targets)
             );
             save_cached_pantry(merged_items);
         }
@@ -1271,40 +1602,7 @@ def:pub app() -> JsxElement {
     }
 
     if is_hydrating_user_state {
-        return
-            <div
-                style={{
-                    "minHeight": "100vh",
-                    "background": "radial-gradient(circle at 5% 10%, #ffe5b4 0%, #ffe5b400 30%), radial-gradient(circle at 95% 0%, #b7d7ff 0%, #b7d7ff00 35%), linear-gradient(135deg, #f4f8ff 0%, #f6fffb 50%, #fff7ef 100%)",
-                    "fontFamily": "'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif",
-                    "color": "#10243f",
-                    "padding": "22px",
-                    "display": "grid",
-                    "placeItems": "center"
-                }}
-            >
-                <div
-                    style={{
-                        "width": "min(520px, 100%)",
-                        "background": "#ffffffde",
-                        "border": "1px solid #d2e3f5",
-                        "borderRadius": "18px",
-                        "padding": "20px",
-                        "display": "grid",
-                        "gap": "14px"
-                    }}
-                >
-                    <div>
-                        <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>CaloReceipt</h1>
-                        <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                            Restoring your workspace and account state.
-                        </p>
-                    </div>
-                    <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
-                        {auth_error_text()}
-                    </div>
-                </div>
-            </div>;
+        return route_transition_shell("CaloReceipt", "Restoring your workspace and account state.");
     }
 
     if not is_logged_in and not is_auth_route() {
@@ -1321,127 +1619,116 @@ def:pub app() -> JsxElement {
 
     if not is_logged_in {
         return
-            <div
-                style={{
-                    "minHeight": "100vh",
-                    "background": "radial-gradient(circle at 5% 10%, #ffe5b4 0%, #ffe5b400 30%), radial-gradient(circle at 95% 0%, #b7d7ff 0%, #b7d7ff00 35%), linear-gradient(135deg, #f4f8ff 0%, #f6fffb 50%, #fff7ef 100%)",
-                    "fontFamily": "'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif",
-                    "color": "#10243f",
-                    "padding": "22px",
-                    "display": "grid",
-                    "placeItems": "center"
-                }}
-            >
-                <div
-                    style={{
-                        "width": "min(520px, 100%)",
-                        "background": "#ffffffde",
-                        "border": "1px solid #d2e3f5",
-                        "borderRadius": "18px",
-                        "padding": "20px",
-                        "display": "grid",
-                        "gap": "14px"
-                    }}
-                >
-                    <div>
-                        <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>CaloReceipt</h1>
-                        <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                            {("Create your account first. We will ask for your profile right after signup." if auth_mode == "signup" else "Sign in to access your private profile, pantry, and recipe graph.")}
-                        </p>
-                    </div>
-                    <div style={{"display": "flex", "gap": "8px"}}>
-                        <button
-                            onClick={lambda -> None { auth_mode = "login"; }}
-                            style={{
-                                "padding": "8px 12px",
-                                "borderRadius": "999px",
-                                "border": "1px solid #1d4ed8",
-                                "background": ("#dbeafe" if auth_mode == "login" else "#ffffff"),
-                                "fontWeight": "700"
-                            }}
-                        >
-                            Login
-                        </button>
-                        <button
-                            onClick={lambda -> None { auth_mode = "signup"; }}
-                            style={{
-                                "padding": "8px 12px",
-                                "borderRadius": "999px",
-                                "border": "1px solid #166534",
-                                "background": ("#dcfce7" if auth_mode == "signup" else "#ffffff"),
-                                "fontWeight": "700"
-                            }}
-                        >
-                            Register
-                        </button>
-                    </div>
-                    <div style={{"display": "grid", "gap": "10px"}}>
+            <div className="cr-auth-page">
+                <div className="cr-auth-layout">
+                    <div className="cr-auth-aside">
                         <div>
-                            <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Email</label>
-                            <input
-                                value={auth_email}
-                                onChange={lambda e: any -> None { auth_email = e.target.value; }}
-                                placeholder="you@example.com"
-                                style={{"width": "100%", "padding": "10px", "border": "1px solid #cbd5e1", "borderRadius": "10px"}}
-                            />
+                            <div className="cr-auth-kicker">Receipt-first planning</div>
+                            <h1 className="greeting" style={{"margin": "0 0 0.35rem 0"}}>
+                                Build your food system once.
+                            </h1>
+                            <p className="greeting-sub" style={{"margin": "0"}}>
+                                CaloReceipt turns receipts into pantry state, meal ideas, and macro-aware nutrition tracking.
+                            </p>
                         </div>
-                        <div>
-                            <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Password</label>
-                            <input
-                                type="password"
-                                value={auth_password}
-                                onChange={lambda e: any -> None { auth_password = e.target.value; }}
-                                placeholder="password"
-                                style={{"width": "100%", "padding": "10px", "border": "1px solid #cbd5e1", "borderRadius": "10px"}}
-                            />
+                        <div className="cr-auth-points">
+                            <div className="cr-auth-point">
+                                <div className="card-title">Receipt to pantry</div>
+                                <div className="card-subtitle">Capture receipts, parse grocery items, and keep inventory up to date.</div>
+                            </div>
+                            <div className="cr-auth-point">
+                                <div className="card-title">Profile-driven macros</div>
+                                <div className="card-subtitle">Use your measurements and goals to personalize recipes and nutrition targets.</div>
+                            </div>
+                            <div className="cr-auth-point">
+                                <div className="card-title">One shared workspace</div>
+                                <div className="card-subtitle">Move cleanly between intake, planning, ranking, and weekly progress.</div>
+                            </div>
                         </div>
-                        <button
-                            onClick={(do_login if auth_mode == "login" else do_signup)}
-                            style={{
-                                "padding": "10px 12px",
-                                "borderRadius": "10px",
-                                "border": ("1px solid #1d4ed8" if auth_mode == "login" else "1px solid #166534"),
-                                "background": ("#dbeafe" if auth_mode == "login" else "#dcfce7"),
-                                "fontWeight": "700"
-                            }}
-                        >
-                            {("Sign In" if auth_mode == "login" else "Create Account")}
-                        </button>
-                        <div style={{"display": "grid", "gap": "8px"}}>
+                    </div>
+
+                    <div className="login-card cr-auth-card">
+                        <div className="login-header">
+                            <div className="login-logo">
+                                <div className="logo-icon">
+                                    <svg viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                    </svg>
+                                </div>
+                                <span>CaloReceipt</span>
+                            </div>
+                            <h1 className="login-title">
+                                {("Welcome back" if auth_mode == "login" else "Create your account")}
+                            </h1>
+                            <p className="login-subtitle">
+                                {("Sign in to reach your pantry, profile, and recipe workspace." if auth_mode == "login" else "Register first. We will route you straight into profile setup after signup.")}
+                            </p>
+                        </div>
+
+                        <div className="cr-auth-switch">
+                            <button onClick={lambda -> None { auth_mode = "login"; }} className={auth_mode_button_class("login")}>
+                                Login
+                            </button>
+                            <button onClick={lambda -> None { auth_mode = "signup"; }} className={auth_mode_button_class("signup")}>
+                                Register
+                            </button>
+                        </div>
+
+                        <div className="cr-auth-grid">
+                            <div className="form-group">
+                                <label className="form-label">Email Address</label>
+                                <input
+                                    value={auth_email}
+                                    onChange={lambda e: any -> None { auth_email = e.target.value; }}
+                                    placeholder="you@example.com"
+                                    className="form-input"
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Password</label>
+                                <input
+                                    type="password"
+                                    value={auth_password}
+                                    onChange={lambda e: any -> None { auth_password = e.target.value; }}
+                                    placeholder="Enter your password"
+                                    className="form-input"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="cr-auth-actions">
+                            <button onClick={(do_login if auth_mode == "login" else do_signup)} className={("btn " + ("cr-btn-accent" if auth_mode == "login" else "cr-btn-success"))}>
+                                {("Sign In" if auth_mode == "login" else "Create Account")}
+                            </button>
+
+                            <div className="login-divider">
+                                <span>or continue with</span>
+                            </div>
+
                             <button
                                 onClick={lambda -> None { start_sso("google"); }}
-                                style={{
-                                    "padding": "10px 12px",
-                                    "borderRadius": "10px",
-                                    "border": ("1px solid #cbd5e1" if sso_provider_configured("google") else "1px solid #f59e0b"),
-                                    "background": ("#ffffff" if sso_provider_configured("google") else "#fffbeb"),
-                                    "fontWeight": "700"
-                                }}
+                                className={("btn " + ("btn-secondary" if sso_provider_configured("google") else "cr-btn-warning"))}
                             >
                                 {("Continue with Google" if auth_mode == "login" else "Register with Google")}
                             </button>
-                            <div style={{"fontSize": "0.9rem", "opacity": "0.78", "lineHeight": "1.4"}}>
+                            <div className="cr-auth-provider-copy">
                                 {("Google sign-in is ready." if sso_provider_configured("google") else sso_setup_message("google"))}
                             </div>
+
                             <button
                                 onClick={lambda -> None { start_sso("apple"); }}
-                                style={{
-                                    "padding": "10px 12px",
-                                    "borderRadius": "10px",
-                                    "border": ("1px solid #cbd5e1" if sso_provider_configured("apple") else "1px solid #f59e0b"),
-                                    "background": ("#ffffff" if sso_provider_configured("apple") else "#fffbeb"),
-                                    "fontWeight": "700"
-                                }}
+                                className={("btn " + ("btn-secondary" if sso_provider_configured("apple") else "cr-btn-warning"))}
                             >
                                 {("Continue with Apple" if auth_mode == "login" else "Register with Apple")}
                             </button>
-                            <div style={{"fontSize": "0.9rem", "opacity": "0.78", "lineHeight": "1.4"}}>
+                            <div className="cr-auth-provider-copy">
                                 {("Apple sign-in is ready." if sso_provider_configured("apple") else sso_setup_message("apple"))}
                             </div>
                         </div>
-                    </div>
-                    <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
-                        {auth_error_text()}
+
+                        <div className="cr-status info">
+                            {auth_error_text()}
+                        </div>
                     </div>
                 </div>
             </div>;
@@ -1449,100 +1736,85 @@ def:pub app() -> JsxElement {
 
     if requires_profile_setup {
         return
-            <div
-                style={{
-                    "minHeight": "100vh",
-                    "background": "radial-gradient(circle at 5% 10%, #ffe5b4 0%, #ffe5b400 30%), radial-gradient(circle at 95% 0%, #b7d7ff 0%, #b7d7ff00 35%), linear-gradient(135deg, #f4f8ff 0%, #f6fffb 50%, #fff7ef 100%)",
-                    "fontFamily": "'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif",
-                    "color": "#10243f",
-                    "padding": "22px"
-                }}
-            >
-                <div
-                    style={{
-                        "maxWidth": "980px",
-                        "margin": "0 auto",
-                        "background": "#ffffffde",
-                        "border": "1px solid #d2e3f5",
-                        "borderRadius": "18px",
-                        "padding": "22px",
-                        "display": "grid",
-                        "gap": "16px"
-                    }}
-                >
-                    <div style={{"display": "flex", "justifyContent": "space-between", "gap": "12px", "alignItems": "center", "flexWrap": "wrap"}}>
-                        <div>
-                            <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>Finish Your Profile</h1>
-                            <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                                One quick survey before you enter the main dashboard. These answers personalize recipes, pantry planning, and nutrition targets.
+            <div className="cr-onboarding-page">
+                <div className="cr-onboarding-container">
+                    <div className="cr-onboarding-hero">
+                        <div className="cr-onboarding-copy">
+                            <div className="cr-auth-kicker">Profile setup</div>
+                            <h1 className="greeting" style={{"margin": "0 0 0.35rem 0"}}>Finish Your Profile</h1>
+                            <p className="greeting-sub" style={{"margin": "0"}}>
+                                One short survey before you enter the dashboard. These fields tune pantry planning, recipe generation, and macro targets.
                             </p>
                         </div>
-                        <div style={{"padding": "8px 12px", "border": "1px solid #fbbf24", "background": "#fffbeb", "borderRadius": "999px", "fontWeight": "700"}}>
-                            Step Required
+                        <div className="cr-page-actions">
+                            <div className="cr-chip warning">Step Required</div>
+                            <div className="cr-chip info">{display_identity()}</div>
                         </div>
                     </div>
 
-                    <div style={{"padding": "10px", "borderRadius": "10px", "border": "1px solid #cbd5e1", "background": "#f8fafc", "fontWeight": "600"}}>
+                    <div className="cr-status warning">
                         {auth_error_text()}
                     </div>
 
-                    <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(260px, 1fr))", "gap": "12px"}}>
-                        <div style={{"border": "1px solid #dbeafe", "background": "#eff6ff", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>
+                    <div className="cr-section-grid">
+                        <div className="cr-form-card">
                             <div>
-                                <div style={{"fontWeight": "800"}}>About You</div>
-                                <div style={{"opacity": "0.76", "fontSize": "0.92rem"}}>Tell us the basics we need for your profile.</div>
+                                <div className="card-title">About You</div>
+                                <div className="card-subtitle">Tell us the basics we need for your profile.</div>
                             </div>
-                            <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(150px, 1fr))", "gap": "10px"}}>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Name</label>
-                                    <input value={signup_name} onChange={lambda e: any -> None { signup_name = e.target.value; }} placeholder="Preferred name" style={{"width": "100%", "padding": "10px", "border": "1px solid #bfdbfe", "borderRadius": "10px"}} />
+                            <div className="cr-form-row">
+                                <div className="form-group">
+                                    <label className="form-label">Name</label>
+                                    <input value={signup_name} onChange={lambda e: any -> None { signup_name = e.target.value; }} placeholder="Preferred name" />
                                 </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Age</label>
-                                    <input value={signup_age} onChange={lambda e: any -> None { signup_age = e.target.value; }} placeholder="Years" style={{"width": "100%", "padding": "10px", "border": "1px solid #bfdbfe", "borderRadius": "10px"}} />
-                                </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Sex</label>
-                                    <select value={signup_sex} onChange={lambda e: any -> None { signup_sex = e.target.value; }} style={{"width": "100%", "padding": "10px", "border": "1px solid #bfdbfe", "borderRadius": "10px"}}>
-                                        <option value="MALE">Male</option>
-                                        <option value="FEMALE">Female</option>
-                                        <option value="OTHER">Other</option>
-                                        <option value="PREFER_NOT_TO_SAY">Prefer not to say</option>
-                                    </select>
+                                <div className="cr-form-row two">
+                                    <div className="form-group">
+                                        <label className="form-label">Age</label>
+                                        <input value={signup_age} onChange={lambda e: any -> None { signup_age = e.target.value; }} placeholder="Years" />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Sex</label>
+                                        <select value={signup_sex} onChange={lambda e: any -> None { signup_sex = e.target.value; }}>
+                                            <option value="MALE">Male</option>
+                                            <option value="FEMALE">Female</option>
+                                            <option value="OTHER">Other</option>
+                                            <option value="PREFER_NOT_TO_SAY">Prefer not to say</option>
+                                        </select>
+                                    </div>
                                 </div>
                             </div>
                         </div>
 
-                        <div style={{"border": "1px solid #dcfce7", "background": "#f0fdf4", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>
+                        <div className="cr-form-card">
                             <div>
-                                <div style={{"fontWeight": "800"}}>Body Metrics</div>
-                                <div style={{"opacity": "0.76", "fontSize": "0.92rem"}}>We use these to tailor calories, macros, and portion suggestions.</div>
+                                <div className="card-title">Body Metrics</div>
+                                <div className="card-subtitle">We use these to tailor calories, macros, and portion guidance.</div>
                             </div>
-                            <div style={{"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(150px, 1fr))", "gap": "10px"}}>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Height (in)</label>
-                                    <input value={signup_height} onChange={lambda e: any -> None { signup_height = e.target.value; }} placeholder="70" style={{"width": "100%", "padding": "10px", "border": "1px solid #86efac", "borderRadius": "10px"}} />
+                            <div className="cr-form-row">
+                                <div className="form-group">
+                                    <label className="form-label">Height (in)</label>
+                                    <input value={signup_height} onChange={lambda e: any -> None { signup_height = e.target.value; }} placeholder="70" />
                                 </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Current Weight (lb)</label>
-                                    <input value={signup_weight} onChange={lambda e: any -> None { signup_weight = e.target.value; }} placeholder="170" style={{"width": "100%", "padding": "10px", "border": "1px solid #86efac", "borderRadius": "10px"}} />
+                                <div className="form-group">
+                                    <label className="form-label">Current Weight (lb)</label>
+                                    <input value={signup_weight} onChange={lambda e: any -> None { signup_weight = e.target.value; }} placeholder="170" />
                                 </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Goal Weight (lb)</label>
-                                    <input value={signup_goal_weight} onChange={lambda e: any -> None { signup_goal_weight = e.target.value; }} placeholder="Optional" style={{"width": "100%", "padding": "10px", "border": "1px solid #86efac", "borderRadius": "10px"}} />
+                                <div className="form-group">
+                                    <label className="form-label">Goal Weight (lb)</label>
+                                    <input value={signup_goal_weight} onChange={lambda e: any -> None { signup_goal_weight = e.target.value; }} placeholder="Optional" />
                                 </div>
                             </div>
                         </div>
 
-                        <div style={{"border": "1px solid #fde68a", "background": "#fffbeb", "borderRadius": "14px", "padding": "14px", "display": "grid", "gap": "10px"}}>
+                        <div className="cr-form-card">
                             <div>
-                                <div style={{"fontWeight": "800"}}>Goals And Food Preferences</div>
-                                <div style={{"opacity": "0.76", "fontSize": "0.92rem"}}>Set your activity level, overall goal, restrictions, and allergies.</div>
+                                <div className="card-title">Goals And Preferences</div>
+                                <div className="card-subtitle">Set activity level, overall goal, restrictions, and allergies.</div>
                             </div>
-                            <div style={{"display": "grid", "gap": "10px"}}>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Fitness Level</label>
-                                    <select value={signup_fitness_level} onChange={lambda e: any -> None { signup_fitness_level = e.target.value; }} style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}}>
+                            <div className="cr-form-row">
+                                <div className="form-group">
+                                    <label className="form-label">Fitness Level</label>
+                                    <select value={signup_fitness_level} onChange={lambda e: any -> None { signup_fitness_level = e.target.value; }}>
                                         <option value="SEDENTARY">Sedentary</option>
                                         <option value="LIGHTLY_ACTIVE">Lightly active</option>
                                         <option value="MODERATELY_ACTIVE">Moderately active</option>
@@ -1550,9 +1822,9 @@ def:pub app() -> JsxElement {
                                         <option value="ATHLETE">Athlete</option>
                                     </select>
                                 </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Overall Goal</label>
-                                    <select value={signup_goal} onChange={lambda e: any -> None { signup_goal = e.target.value; }} style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}}>
+                                <div className="form-group">
+                                    <label className="form-label">Overall Goal</label>
+                                    <select value={signup_goal} onChange={lambda e: any -> None { signup_goal = e.target.value; }}>
                                         <option value="FAT_LOSS">Fat loss</option>
                                         <option value="MAINTENANCE">Maintenance</option>
                                         <option value="LEAN_BULK">Lean bulk</option>
@@ -1560,23 +1832,23 @@ def:pub app() -> JsxElement {
                                         <option value="ENDURANCE_PERFORMANCE">Endurance performance</option>
                                     </select>
                                 </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Dietary Restrictions</label>
-                                    <input value={signup_dietary_notes} onChange={lambda e: any -> None { signup_dietary_notes = e.target.value; }} placeholder="Comma-separated, e.g. vegetarian, halal" style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}} />
+                                <div className="form-group">
+                                    <label className="form-label">Dietary Restrictions</label>
+                                    <input value={signup_dietary_notes} onChange={lambda e: any -> None { signup_dietary_notes = e.target.value; }} placeholder="Comma-separated, e.g. vegetarian, halal" />
                                 </div>
-                                <div>
-                                    <label style={{"display": "block", "fontWeight": "700", "marginBottom": "4px"}}>Allergies</label>
-                                    <input value={signup_allergy_notes} onChange={lambda e: any -> None { signup_allergy_notes = e.target.value; }} placeholder="Comma-separated, e.g. peanuts, shellfish" style={{"width": "100%", "padding": "10px", "border": "1px solid #fcd34d", "borderRadius": "10px"}} />
+                                <div className="form-group">
+                                    <label className="form-label">Allergies</label>
+                                    <input value={signup_allergy_notes} onChange={lambda e: any -> None { signup_allergy_notes = e.target.value; }} placeholder="Comma-separated, e.g. peanuts, shellfish" />
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
-                        <button onClick={complete_profile_setup} style={{"padding": "10px 14px", "borderRadius": "10px", "border": "1px solid #166534", "background": "#dcfce7", "fontWeight": "700"}}>
+                    <div className="cr-form-actions">
+                        <button onClick={complete_profile_setup} className="btn cr-btn-success">
                             Save And Enter Dashboard
                         </button>
-                        <button onClick={do_logout} style={{"padding": "10px 14px", "borderRadius": "10px", "border": "1px solid #991b1b", "background": "#fee2e2", "fontWeight": "700"}}>
+                        <button onClick={do_logout} className="btn cr-btn-danger">
                             Log Out
                         </button>
                     </div>
@@ -1585,128 +1857,107 @@ def:pub app() -> JsxElement {
     }
 
     return
-        <div
-            style={{
-                "minHeight": "100vh",
-                "background": "radial-gradient(circle at 5% 10%, #ffe5b4 0%, #ffe5b400 30%), radial-gradient(circle at 95% 0%, #b7d7ff 0%, #b7d7ff00 35%), linear-gradient(135deg, #f4f8ff 0%, #f6fffb 50%, #fff7ef 100%)",
-                "fontFamily": "'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif",
-                "color": "#10243f",
-                "padding": "22px"
-            }}
-        >
-            <div
-                style={{
-                    "maxWidth": "1180px",
-                    "margin": "0 auto",
-                    "display": "grid",
-                    "gap": "16px"
-                }}
-            >
-                <div
-                    style={{
-                        "background": "#ffffffd9",
-                        "border": "1px solid #d2e3f5",
-                        "borderRadius": "18px",
-                        "padding": "18px",
-                        "display": "grid",
-                        "gap": "14px"
-                    }}
-                >
-                    <div style={{"display": "flex", "justifyContent": "space-between", "gap": "10px", "flexWrap": "wrap", "alignItems": "center"}}>
-                        <div>
-                            <h1 style={{"margin": "0", "fontSize": "2rem", "letterSpacing": "0.02em"}}>CaloReceipt</h1>
-                            <p style={{"margin": "6px 0 0 0", "opacity": "0.78"}}>
-                                Five-tab workspace for intake, planning, profile, recipes, and nutrition history.
-                            </p>
-                        </div>
-                        <div style={{"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"}}>
-                            <div
-                                style={{
-                                    "padding": "8px 12px",
-                                    "border": "1px solid #86efac",
-                                    "borderRadius": "999px",
-                                    "fontWeight": "700",
-                                    "background": "#f0fdf4"
-                                }}
-                            >
-                                User: {current_user_display}
+        <div className="app-container cr-app-shell">
+            <nav className="top-nav">
+                <div className="nav-container cr-nav-container">
+                    <div className="cr-nav-left">
+                        <button onClick={lambda -> None { set_tab("dashboard"); }} className="logo cr-logo-button">
+                            <div className="logo-icon">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                </svg>
                             </div>
-                            <div
-                                style={{
-                                    "padding": "8px 12px",
-                                    "border": "1px solid #bfdbfe",
-                                    "borderRadius": "999px",
-                                    "fontWeight": "700",
-                                    "background": "#eff6ff"
-                                }}
-                            >
-                                Active Tab: {active_tab}
-                            </div>
-                            <button
-                                onClick={do_logout}
-                                style={{
-                                    "padding": "8px 12px",
-                                    "borderRadius": "999px",
-                                    "border": "1px solid #991b1b",
-                                    "background": "#fee2e2",
-                                    "fontWeight": "700"
-                                }}
-                            >
-                                Log Out
-                            </button>
+                            CaloReceipt
+                        </button>
+                        <div className="cr-nav-menu">
+                            <button onClick={lambda -> None { set_tab("receipt"); }} className={nav_link_class("receipt")}>Receipt Upload</button>
+                            <button onClick={lambda -> None { set_tab("dashboard"); }} className={nav_link_class("dashboard")}>Dashboard</button>
+                            <button onClick={lambda -> None { set_tab("profile"); }} className={nav_link_class("profile")}>User Profile</button>
+                            <button onClick={lambda -> None { set_tab("recipes"); }} className={nav_link_class("recipes")}>Recipes</button>
+                            <button onClick={lambda -> None { set_tab("nutrition"); }} className={nav_link_class("nutrition")}>Nutrition</button>
                         </div>
                     </div>
-                    <div style={{"display": "flex", "gap": "8px", "flexWrap": "wrap"}}>
-                        <button onClick={lambda -> None { set_tab("receipt"); }} style={tab_button_style("receipt")}>
-                            Receipt Upload
-                        </button>
-                        <button onClick={lambda -> None { set_tab("dashboard"); }} style={tab_button_style("dashboard")}>
-                            Dashboard / AI Bot
-                        </button>
-                        <button onClick={lambda -> None { set_tab("profile"); }} style={tab_button_style("profile")}>
-                            User Profile
-                        </button>
-                        <button onClick={lambda -> None { set_tab("recipes"); }} style={tab_button_style("recipes")}>
-                            Recipes
-                        </button>
-                        <button onClick={lambda -> None { set_tab("nutrition"); }} style={tab_button_style("nutrition")}>
-                            Nutrition
-                        </button>
+                    <div className="nav-right">
+                        <div className="user-menu">
+                            <div className="user-avatar">{user_initials()}</div>
+                            <span className="user-name">{display_identity()}</span>
+                        </div>
+                        <button onClick={do_logout} className="btn cr-btn-danger">Log Out</button>
+                    </div>
+                </div>
+            </nav>
+
+            <main className="main-content cr-main-content">
+                <div className="page-header cr-page-header">
+                    <div>
+                        <h1 className="greeting">{greeting_text()}</h1>
+                        <p className="greeting-sub">{tab_summary(active_tab)}</p>
+                    </div>
+                    <div className="cr-page-actions">
+                        <div className="cr-chip success">Signed In</div>
+                        <div className="cr-chip info">{tab_label(active_tab)}</div>
                     </div>
                 </div>
 
-                <div style={{"display": ("block" if active_tab == "receipt" else "none")}}>
-                    <ReceiptUploadTab
-                        shared_state={app_state}
-                        on_auth_error={handle_auth_required}
-                        on_pantry_change={save_pantry_state}
-                        is_active={active_tab == "receipt"}
-                    />
+                <div className="stats-grid cr-stats-grid">
+                    <div className="cr-stat-card">
+                        <div className="stat-label">Pantry Items</div>
+                        <div className="stat-value">{String(as_pantry_items(app_state.pantry_items).length)}</div>
+                        <div className="card-subtitle">Current inventory synced from receipts and pantry edits.</div>
+                    </div>
+                    <div className="cr-stat-card">
+                        <div className="stat-label">Nutrition Days</div>
+                        <div className="stat-value">{String(as_nutrition_history(app_state.nutrition_history).length)}</div>
+                        <div className="card-subtitle">Weekly history entries available in the nutrition tab.</div>
+                    </div>
+                    <div className="cr-stat-card">
+                        <div className="stat-label">Profile Identity</div>
+                        <div className="stat-value">{user_initials()}</div>
+                        <div className="card-subtitle">{display_identity()}</div>
+                    </div>
+                    <div className="cr-stat-card">
+                        <div className="stat-label">Active Workspace</div>
+                        <div className="stat-value">{tab_label(active_tab)}</div>
+                        <div className="card-subtitle">Jump between intake, planning, recipes, and progress.</div>
+                    </div>
                 </div>
-                <div style={{"display": ("block" if active_tab == "dashboard" else "none")}}>
-                    <DashboardAiTab on_auth_error={handle_auth_required} />
+
+                <div className="cr-panel-stack">
+                    <div className="cr-tab-frame" style={{"display": ("block" if active_tab == "receipt" else "none")}}>
+                        <ReceiptUploadTab
+                            shared_state={app_state}
+                            on_auth_error={handle_auth_required}
+                            on_pantry_change={save_pantry_state}
+                            is_active={active_tab == "receipt"}
+                        />
+                    </div>
+                    <div className="cr-tab-frame" style={{"display": ("block" if active_tab == "dashboard" else "none")}}>
+                        <DashboardAiTab on_auth_error={handle_auth_required} />
+                    </div>
+                    <div className="cr-tab-frame" style={{"display": ("block" if active_tab == "profile" else "none")}}>
+                        <UserProfileTab
+                            on_auth_error={handle_auth_required}
+                            on_profile_change={handle_profile_change}
+                            user_storage_key={active_user_key}
+                        />
+                    </div>
+                    <div className="cr-tab-frame" style={{"display": ("block" if active_tab == "recipes" else "none")}}>
+                        <RecipesTab
+                            shared_state={app_state}
+                            on_auth_error={handle_auth_required}
+                            on_pantry_change={save_pantry_state}
+                            on_nutrition_change={save_nutrition_state}
+                        />
+                    </div>
+                    <div className="cr-tab-frame" style={{"display": ("block" if active_tab == "nutrition" else "none")}}>
+                        <NutritionTab
+                            shared_state={app_state}
+                            on_nutrition_change={save_nutrition_state}
+                            on_auth_error={handle_auth_required}
+                            is_hydrating={is_hydrating_user_state}
+                        />
+                    </div>
                 </div>
-                <div style={{"display": ("block" if active_tab == "profile" else "none")}}>
-                    <UserProfileTab
-                        on_auth_error={handle_auth_required}
-                        on_profile_change={handle_profile_change}
-                        user_storage_key={active_user_key}
-                    />
-                </div>
-                <div style={{"display": ("block" if active_tab == "recipes" else "none")}}>
-                    <RecipesTab
-                        shared_state={app_state}
-                        on_auth_error={handle_auth_required}
-                        on_pantry_change={save_pantry_state}
-                    />
-                </div>
-                <div style={{"display": ("block" if active_tab == "nutrition" else "none")}}>
-                    <NutritionTab
-                        shared_state={app_state}
-                        on_nutrition_change={save_nutrition_state}
-                        is_hydrating={is_hydrating_user_state}
-                    />
-                </div>
-            </div>
+            </main>
         </div>;
 }

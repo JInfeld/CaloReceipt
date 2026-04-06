@@ -6,6 +6,7 @@ import from llm_config {
     llm
 }
 import importlib;
+import json;
 import os;
 import sys;
 import time;
@@ -52,7 +53,10 @@ obj RecipePlan {
     has total_protein_g: float;
     has total_carbs_g: float;
     has total_fat_g: float;
+    has preference_encoding: str = "";
 }
+
+sem RecipePlan.preference_encoding = "A compact 1-2 sentence taste/style fingerprint for future personalization. Mention cuisine or meal style, dominant ingredients, flavor profile, cooking method, texture, and what kind of craving it satisfies.";
 
 obj RankedRecipePlacement {
     has position: int;
@@ -75,6 +79,12 @@ quantity is the number of available servings,
 unit is the pantry serving unit,
 and cost/protein/carb/fat describe one USDA serving given by serving_size when present.
 For output recipe_ingredients, quantity should be the total number of units used in the recipe.
+If the profile's dietary_restrictions contains a "Requested meal type: ..."
+hint, use it as a strong constraint on the kind of recipe you generate.
+If the profile's dietary_restrictions contains "Preference guidance:" or
+"Preference encoding:" hints, treat them as strong style signals from the user's
+favorite previously-ranked recipes. Follow those cues without copying an old recipe verbatim.
+Always fill preference_encoding with a compact style fingerprint for future personalization.
 """
 def generate_recipe(profile: user, pantry_ingredients: list[Ingredient]) -> RecipePlan by llm();
 
@@ -159,6 +169,34 @@ sem ReceiptPantryParse.food_line_items = "Only visible food line-items from the 
 sem ReceiptPantryParse.receipt_total = "Exact final total printed on the receipt (after discounts/tax) as a numeric USD value.";
 sem ReceiptPantryParse.notes = "Short extraction notes; mention ambiguity and any excluded non-food lines.";
 
+obj ReceiptFoodLineCost {
+    has name: str;
+    has cost: float;
+}
+
+obj ReceiptFoodLineCostBatch {
+    has store_name: str;
+    has subtotal: float;
+    has tax: float;
+    has extracted_text: str;
+    has food_line_items: list[ReceiptFoodLineCost];
+    has receipt_total: float;
+    has notes: str;
+}
+
+sem ReceiptFoodLineCostBatch.store_name = "Exact store/merchant name as printed on receipt header; empty string if unreadable.";
+sem ReceiptFoodLineCostBatch.subtotal = "Receipt subtotal before tax/fees; 0 if not visible.";
+sem ReceiptFoodLineCostBatch.tax = "Tax amount; 0 if not visible.";
+sem ReceiptFoodLineCostBatch.extracted_text = "Raw OCR text used for receipt parsing.";
+sem ReceiptFoodLineCostBatch.food_line_items = "Only visible food line-items from the receipt with exact line-item cost. No inferred quantities yet.";
+sem ReceiptFoodLineCostBatch.receipt_total = "Exact final total printed on the receipt (after discounts/tax) as a numeric USD value.";
+sem ReceiptFoodLineCostBatch.notes = "Short extraction notes; mention ambiguity and any excluded non-food lines.";
+
+obj ReceiptQuantityInferenceBatch {
+    has items: list[Ingredient];
+    has notes: str = "";
+}
+
 obj UsdaFoodSearchHint {
     has original_name: str;
     has search_name: str;
@@ -187,29 +225,39 @@ obj UsdaMacroEstimateBatch {
     has notes: str = "";
 }
 
-"""Parse a receipt image into pantry ingredients.
-The input is a data URL string (e.g. data:image/jpeg;base64,...).
-Keep exact product naming from the receipt (brand + product), e.g. "Great Value Chicken Breast".
-Return one ingredient per visible food line only. Do NOT invent items that are not present.
-Prefer exact label text from line item, including brand/store product prefixes.
-If the item appears to be a store-brand product but the brand prefix is abbreviated or implied by the merchant, expand it into the likely house brand name when strongly supported by the store context.
-Use line-item price as Ingredient.cost.
-Before USDA lookup, quantity/unit must represent the FULL purchased item size or package amount,
-not the USDA serving count. Examples: "Great Value Peanut Butter 16 oz" -> quantity=16, unit=OZ;
-"Eggland's Best Eggs 12 ct" -> quantity=12, unit=PIECE.
-If size is not printed directly but is strongly inferable from the item/store context, infer a conservative full-item quantity/unit.
-Skip non-food lines and keep units inside the supported Unit enum.
-Prefer full-item kitchen/package units when visible or strongly inferable
-(examples: eggs as PIECE count, garlic as CLOVE count, herbs as BUNCH count, rice as OZ/LB/CUP package size, sauces/oils as OZ/CUP/TBSP/TSP bottle size).
+"""Parse receipt OCR text into store metadata and visible food line-items with cost only.
+Input text should be the OCR transcription from the receipt image.
+Extract store_name, subtotal, tax, receipt_total, and extracted_text from the visible text.
+Return exactly one ReceiptFoodLineCost per visible food line-item.
+Only include visible food items that appear on the receipt; do not invent missing lines.
+Use the exact visible line-item cost for each item.
+Do not infer package quantity or unit yet.
+Preserve exact brand/product wording when possible, but correct obvious OCR mistakes when confidence is high.
+Translate obvious receipt shorthand into human-readable pantry names when strongly supported by nearby OCR tokens.
+Ignore totals/subtotals/tax/payment lines as ingredients.
 If a line is uncertain or unreadable, exclude it rather than guessing.
-Correct obvious OCR spelling mistakes in product names (example: "BU7TR" -> "BUTTER", "CHKN" -> "CHICKEN").
-Expand receipt abbreviations/lingo into fully spelled item names while preserving brand when visible
-(examples: "GV" -> "Great Value", "PNT BUTTR" -> "Peanut Butter", "PARM" -> "Parmesan", "CHNK CHKN" -> "Chunk Chicken").
-Prefer clear consumer-facing pantry names over cryptic receipt shorthand.
-Do not hallucinate missing words: only expand abbreviations when strongly supported by OCR context.
-Extract store_name, subtotal, tax, and receipt_total exactly from visible printed text.
-Ensure the sum of returned food_line_items costs closely matches receipt_total.
-Always populate extracted_text with the full readable receipt transcription.
+Ensure the sum of returned food_line_items costs is close to receipt_total when possible.
+"""
+def extract_receipt_food_items_with_costs(receipt_text: str) -> ReceiptFoodLineCostBatch by llm();
+
+"""Infer full purchased package quantity/unit for receipt items.
+Input items already contain exact visible item names and exact line-item cost from the receipt.
+Return exactly one Ingredient per input item, preserving input order and cost.
+Use store_name, receipt_text, and item cost together to infer the FULL purchased quantity/unit,
+not the USDA serving count.
+Prefer conservative package sizes when strongly supported by store context and price.
+If quantity cannot be inferred confidently, keep quantity=1 and unit=PIECE.
+Keep item names human-readable and preserve visible brand when supported by the OCR text.
+Do not drop items, invent new items, or change item order.
+"""
+def infer_receipt_item_total_quantities(
+    store_name: str = "",
+    receipt_text: str = "",
+    items: list[Ingredient] = []
+) -> ReceiptQuantityInferenceBatch by llm();
+
+"""Parse a receipt image directly into pantry ingredients.
+Deprecated in favor of the OCR text pipeline, but retained as a fallback parser.
 """
 def parse_receipt_image_into_pantry_items(receipt_image_data_url: str) -> ReceiptPantryParse by llm();
 
@@ -322,6 +370,189 @@ def ingredient_to_payload(ing: Ingredient) -> dict {
         "package_quantity": _round_two(package_quantity),
         "package_unit": str(package_unit).split(".")[-1].upper()
     };
+}
+
+def _debug_clip_text(raw_text: any, limit: int = 6000) -> str {
+    text = str(raw_text).strip();
+    if len(text) <= limit {
+        return text;
+    }
+    remaining = len(text) - limit;
+    return "{}\n... <truncated {} chars> ...".format(text[:limit], str(remaining));
+}
+
+def _receipt_parse_debug_payload(parsed: ReceiptPantryParse, parse_stage: str = "") -> dict {
+    item_rows: list = [];
+    for ing in parsed.food_line_items {
+        item_rows.append(ingredient_to_payload(ing));
+    }
+    return {
+        "parse_stage": parse_stage,
+        "store_name": parsed.store_name,
+        "subtotal": parsed.subtotal,
+        "tax": parsed.tax,
+        "receipt_total": parsed.receipt_total,
+        "notes": parsed.notes,
+        "extracted_text": parsed.extracted_text,
+        "food_line_items": item_rows
+    };
+}
+
+def _receipt_cost_batch_debug_payload(batch: ReceiptFoodLineCostBatch, parse_stage: str = "") -> dict {
+    item_rows: list = [];
+    for row in batch.food_line_items {
+        item_rows.append({
+            "name": str(row.name).strip(),
+            "cost": _round_two(float(row.cost))
+        });
+    }
+    return {
+        "parse_stage": parse_stage,
+        "store_name": batch.store_name,
+        "subtotal": batch.subtotal,
+        "tax": batch.tax,
+        "receipt_total": batch.receipt_total,
+        "notes": batch.notes,
+        "extracted_text": batch.extracted_text,
+        "food_line_items": item_rows
+    };
+}
+
+def _receipt_quantity_debug_payload(batch: ReceiptQuantityInferenceBatch, parse_stage: str = "") -> dict {
+    item_rows: list = [];
+    for ing in batch.items {
+        item_rows.append(ingredient_to_payload(ing));
+    }
+    return {
+        "parse_stage": parse_stage,
+        "notes": batch.notes,
+        "items": item_rows
+    };
+}
+
+def _print_receipt_debug_text(request_id: str, stage_name: str, raw_text: any) -> None {
+    print("[ReceiptDebug] request_id={} stage={}:begin".format(request_id, stage_name));
+    print(_debug_clip_text(raw_text));
+    print("[ReceiptDebug] request_id={} stage={}:end".format(request_id, stage_name));
+}
+
+def _print_receipt_debug_json(request_id: str, stage_name: str, payload: any) -> None {
+    print("[ReceiptDebug] request_id={} stage={}:begin".format(request_id, stage_name));
+    try {
+        print(_debug_clip_text(json.dumps(payload, indent=2), 12000));
+    } except Exception as debug_e {
+        print("Debug JSON render failed: {}".format(str(debug_e)));
+        print(_debug_clip_text(str(payload), 12000));
+    }
+    print("[ReceiptDebug] request_id={} stage={}:end".format(request_id, stage_name));
+}
+
+def _receipt_cost_batch_seed_items(batch: ReceiptFoodLineCostBatch) -> list[Ingredient] {
+    seeds: list[Ingredient] = [];
+    for row in batch.food_line_items {
+        name_text = str(row.name).strip();
+        if name_text == "" {
+            continue;
+        }
+        cost_value = float(row.cost);
+        if cost_value < 0.0 {
+            continue;
+        }
+        seeds.append(
+            Ingredient(
+                name=name_text,
+                quantity=1.0,
+                unit=Unit.PIECE,
+                cost=_round_two(cost_value),
+                protein=0.0,
+                carb=0.0,
+                fat=0.0
+            )
+        );
+    }
+    return seeds;
+}
+
+def _merge_receipt_quantity_inference(
+    seed_items: list[Ingredient],
+    inferred_items: list[Ingredient]
+) -> list[Ingredient] {
+    if seed_items == [] {
+        return [];
+    }
+    if inferred_items == [] or len(inferred_items) != len(seed_items) {
+        return seed_items;
+    }
+
+    merged: list[Ingredient] = [];
+    idx = 0;
+    for seed in seed_items {
+        inferred = inferred_items[idx];
+        next_name = str(inferred.name).strip();
+        if next_name == "" {
+            next_name = seed.name;
+        }
+        next_quantity = inferred.quantity;
+        if next_quantity <= 0.0 {
+            next_quantity = seed.quantity;
+        }
+        next_unit = inferred.unit;
+        if next_quantity <= 0.0 {
+            next_unit = seed.unit;
+            next_quantity = 1.0;
+        }
+        next_cost = inferred.cost;
+        if next_cost < 0.0 {
+            next_cost = seed.cost;
+        } elif next_cost == 0.0 and seed.cost > 0.0 {
+            next_cost = seed.cost;
+        }
+        next_package_quantity = inferred.package_quantity;
+        next_package_unit = inferred.package_unit;
+        if next_package_quantity <= 0.0 {
+            next_package_quantity = next_quantity;
+            next_package_unit = next_unit;
+        }
+        merged.append(
+            Ingredient(
+                name=next_name,
+                quantity=_round_two(next_quantity),
+                unit=next_unit,
+                cost=_round_two(next_cost),
+                protein=_round_two(inferred.protein),
+                carb=_round_two(inferred.carb),
+                fat=_round_two(inferred.fat),
+                serving_size=str(inferred.serving_size).strip(),
+                package_quantity=_round_two(next_package_quantity),
+                package_unit=next_package_unit
+            )
+        );
+        idx += 1;
+    }
+    return merged;
+}
+
+def _receipt_pipeline_parse_from_batches(
+    cost_batch: ReceiptFoodLineCostBatch,
+    quantity_batch: ReceiptQuantityInferenceBatch,
+    receipt_text: str
+) -> ReceiptPantryParse {
+    extracted_text = str(cost_batch.extracted_text).strip();
+    if extracted_text == "" {
+        extracted_text = str(receipt_text).strip();
+    }
+    return ReceiptPantryParse(
+        store_name=str(cost_batch.store_name).strip(),
+        subtotal=float(cost_batch.subtotal),
+        tax=float(cost_batch.tax),
+        extracted_text=extracted_text,
+        food_line_items=_merge_receipt_quantity_inference(
+            _receipt_cost_batch_seed_items(cost_batch),
+            quantity_batch.items
+        ),
+        receipt_total=float(cost_batch.receipt_total),
+        notes=_note_merge(str(cost_batch.notes).strip(), str(quantity_batch.notes).strip())
+    );
 }
 
 def _ingredient_as_serving_storage(ing: Ingredient) -> Ingredient {
@@ -727,6 +958,298 @@ def _history_notes(rec: any) -> str {
     } except Exception as _e {
         return "Generated from your profile + pantry";
     }
+}
+
+def _history_preference_encoding(rec: any) -> str {
+    try {
+        return _clip_recipe_text(rec.preference_encoding, 320);
+    } except Exception as _e {
+        return "";
+    }
+}
+
+def _normalize_meal_type(raw: any) -> str {
+    try {
+        meal_text = str(raw).strip().lower();
+    } except Exception as _e {
+        return "";
+    }
+    if meal_text == "breakfast" or meal_text == "lunch" or meal_text == "dinner" or meal_text == "snack" {
+        return meal_text;
+    }
+    return "";
+}
+
+def _history_meal_type(rec: any) -> str {
+    try {
+        return _normalize_meal_type(rec.meal_type);
+    } except Exception as _e {
+        return "";
+    }
+}
+
+def _generated_recipe_note(meal_type: str, preference_hint_count: int = 0) -> str {
+    normalized = _normalize_meal_type(meal_type);
+    if normalized == "" {
+        base = "Generated from your profile + pantry";
+    } else {
+        base = "Generated a {} recipe from your profile + pantry".format(normalized);
+    }
+    if preference_hint_count > 0 {
+        return "{} using {} saved taste cue(s).".format(base, str(preference_hint_count));
+    }
+    return base;
+}
+
+def _clip_recipe_text(raw: any, max_chars: int = 240) -> str {
+    try {
+        text = str(raw).strip();
+    } except Exception as _e {
+        return "";
+    }
+    if text == "" {
+        return "";
+    }
+    if max_chars <= 3 or len(text) <= max_chars {
+        return text;
+    }
+    return "{}...".format(text[:max_chars - 3].strip());
+}
+
+def _macro_style_label(total_protein_g: float, total_carbs_g: float, total_fat_g: float) -> str {
+    if total_protein_g >= total_carbs_g and total_protein_g >= total_fat_g {
+        return "protein-forward";
+    }
+    if total_carbs_g >= total_fat_g {
+        return "carb-forward";
+    }
+    return "fat-forward";
+}
+
+def _fallback_recipe_preference_encoding(
+    recipe_name: any,
+    ingredient_rows: list = [],
+    meal_type: str = "",
+    total_protein_g: float = 0.0,
+    total_carbs_g: float = 0.0,
+    total_fat_g: float = 0.0
+) -> str {
+    lead_items: list = [];
+    for row in ingredient_rows {
+        try {
+            item_name = str(row.get("name", "")).strip();
+        } except Exception as _e {
+            item_name = "";
+        }
+        if item_name == "" {
+            continue;
+        }
+        if item_name in lead_items {
+            continue;
+        }
+        lead_items.append(item_name);
+        if len(lead_items) >= 4 {
+            break;
+        }
+    }
+
+    recipe_title = _clip_recipe_text(recipe_name, 120);
+    macro_style = _macro_style_label(
+        float(total_protein_g),
+        float(total_carbs_g),
+        float(total_fat_g)
+    );
+    meal_label = _normalize_meal_type(meal_type);
+    if meal_label == "" {
+        meal_label = "meal";
+    }
+    ingredient_text = "pantry-led ingredients";
+    if len(lead_items) > 0 {
+        ingredient_text = ", ".join(lead_items);
+    }
+    if recipe_title != "" {
+        return _clip_recipe_text(
+            "{} is a {} {} built around {} with a home-cooked, pantry-friendly style.".format(
+                recipe_title,
+                macro_style,
+                meal_label,
+                ingredient_text
+            ),
+            320
+        );
+    }
+    return _clip_recipe_text(
+        "A {} {} built around {} with a home-cooked, pantry-friendly style.".format(
+            macro_style,
+            meal_label,
+            ingredient_text
+        ),
+        320
+    );
+}
+
+def _resolved_recipe_preference_encoding(
+    raw_encoding: any,
+    recipe_name: any,
+    ingredient_rows: list = [],
+    meal_type: str = "",
+    total_protein_g: float = 0.0,
+    total_carbs_g: float = 0.0,
+    total_fat_g: float = 0.0
+) -> str {
+    encoded = _clip_recipe_text(raw_encoding, 320);
+    if encoded != "" {
+        return encoded;
+    }
+    return _fallback_recipe_preference_encoding(
+        recipe_name,
+        ingredient_rows,
+        meal_type,
+        total_protein_g,
+        total_carbs_g,
+        total_fat_g
+    );
+}
+
+def _history_preference_weight(rec: any, requested_meal_type: str = "") -> float {
+    if _history_preference_encoding(rec) == "" {
+        return 0.0;
+    }
+    tier = _history_rating_tier(rec);
+    if tier == "not_great" and not _history_favorite(rec) {
+        return 0.0;
+    }
+    score = 0.0;
+    if _history_favorite(rec) {
+        score += 6.0;
+    }
+    if tier == "very_good" {
+        score += 4.0;
+    } elif tier == "average" {
+        score += 1.5;
+    }
+    numeric_rating = _history_rating(rec);
+    if numeric_rating > 0.0 {
+        score += numeric_rating / 5.0;
+    }
+    if _history_made(rec) {
+        score += 0.5;
+    }
+    normalized_meal = _normalize_meal_type(requested_meal_type);
+    if normalized_meal != "" and _history_meal_type(rec) == normalized_meal {
+        score += 1.0;
+    }
+    return score;
+}
+
+def _recipe_preference_hints_from_history(
+    history_rows: list,
+    requested_meal_type: str = "",
+    limit: int = 4
+) -> list[str] {
+    ranked_rows: list = [];
+    for rec in history_rows {
+        weight = _history_preference_weight(rec, requested_meal_type);
+        if weight <= 0.0 {
+            continue;
+        }
+        ranked_rows.append({
+            "weight": weight,
+            "favorite": _history_favorite(rec),
+            "rating_tier": _history_rating_tier(rec),
+            "meal_type": _history_meal_type(rec),
+            "title": _history_title(rec),
+            "generated_at_ms": _history_generated_at_ms(rec),
+            "encoding": _history_preference_encoding(rec)
+        });
+    }
+    if ranked_rows == [] {
+        return [];
+    }
+
+    ranked_rows.sort(
+        key=lambda row: dict -> tuple : (
+            -float(row.get("weight", 0.0)),
+            0 if row.get("favorite", False) else 1,
+            -int(row.get("generated_at_ms", 0))
+        )
+    );
+
+    hints: list = [];
+    used_encodings: list = [];
+    for row in ranked_rows {
+        encoding = _clip_recipe_text(row.get("encoding", ""), 240);
+        if encoding == "" or encoding in used_encodings {
+            continue;
+        }
+        used_encodings.append(encoding);
+        context_parts: list = [];
+        if row.get("favorite", False) {
+            context_parts.append("favorite");
+        }
+        tier_name = str(row.get("rating_tier", "")).strip().replace("_", " ");
+        if tier_name != "" {
+            context_parts.append(tier_name);
+        }
+        meal_name = _normalize_meal_type(row.get("meal_type", ""));
+        if meal_name != "" {
+            context_parts.append(meal_name);
+        }
+        context = " / ".join(context_parts);
+        title = _clip_recipe_text(row.get("title", "Saved recipe"), 80);
+        if context != "" {
+            hints.append('{} cue from "{}": {}'.format(context, title, encoding));
+        } else {
+            hints.append('Saved recipe cue from "{}": {}'.format(title, encoding));
+        }
+        if len(hints) >= limit {
+            break;
+        }
+    }
+    return hints;
+}
+
+def _profile_with_meal_request(
+    profile_obj: user,
+    meal_type: str,
+    preference_hints: list = []
+) -> user {
+    normalized = _normalize_meal_type(meal_type);
+    next_restrictions: list = [];
+    for item in profile_obj.dietary_restrictions {
+        item_text = str(item).strip();
+        if item_text != "" {
+            next_restrictions.append(item_text);
+        }
+    }
+    if normalized != "" {
+        next_restrictions.append(
+            "Requested meal type: {}. Generate a recipe that clearly fits that meal.".format(normalized)
+        );
+    }
+    if preference_hints != [] {
+        next_restrictions.append(
+            "Preference guidance: use the following saved favorite/high-ranked recipe encodings as style cues. Keep the new recipe distinct while matching the same overall vibe."
+        );
+        for hint in preference_hints {
+            hint_text = _clip_recipe_text(hint, 260);
+            if hint_text != "" {
+                next_restrictions.append("Preference encoding: {}".format(hint_text));
+            }
+        }
+    }
+    return user(
+        age=profile_obj.age,
+        sex=profile_obj.sex,
+        height=profile_obj.height,
+        weight=profile_obj.weight,
+        fitness_level=profile_obj.fitness_level,
+        goal=profile_obj.goal,
+        goal_weight=profile_obj.goal_weight,
+        username=profile_obj.username,
+        dietary_restrictions=next_restrictions,
+        allergies=profile_obj.allergies
+    );
 }
 
 def _history_instructions(rec: any) -> list {
@@ -1192,6 +1715,118 @@ def _apply_inline_amount_cleanup(items: list[Ingredient], context_label: str) ->
     return cleaned;
 }
 
+def _prefer_display_ingredient_name(current_name: str, candidate_name: str) -> str {
+    current = str(current_name).strip();
+    candidate = str(candidate_name).strip();
+    if current == "" {
+        return candidate;
+    }
+    if candidate == "" {
+        return current;
+    }
+    if len(candidate) > len(current) {
+        return candidate;
+    }
+    return current;
+}
+
+def _combine_items_before_nutrition_lookup(items: list[Ingredient], context_label: str = "") -> dict {
+    if items == [] {
+        return {"items": items, "notes": "", "merged_count": 0};
+    }
+
+    merged: list[Ingredient] = [];
+    bucket_index: dict = {};
+    merged_count = 0;
+
+    for ing in items {
+        name_text = str(ing.name).strip();
+        if name_text == "" {
+            continue;
+        }
+
+        quantity_value = float(ing.quantity);
+        if quantity_value <= 0.0 {
+            quantity_value = 1.0;
+        }
+        cost_value = float(ing.cost);
+        if cost_value < 0.0 {
+            cost_value = 0.0;
+        }
+
+        unit_key = _unit_group(_unit_text(ing.unit));
+        merge_key = "{}|{}".format(_norm_food_name(name_text), unit_key);
+        existing_idx = bucket_index.get(merge_key, None);
+
+        seeded = Ingredient(
+            name=name_text,
+            quantity=_round_two(quantity_value),
+            unit=ing.unit,
+            cost=_round_two(cost_value),
+            protein=_round_two(float(ing.protein)),
+            carb=_round_two(float(ing.carb)),
+            fat=_round_two(float(ing.fat)),
+            serving_size=str(ing.serving_size).strip(),
+            package_quantity=_round_two(quantity_value),
+            package_unit=ing.unit
+        );
+
+        if existing_idx == None {
+            merged.append(seeded);
+            bucket_index[merge_key] = len(merged) - 1;
+            continue;
+        }
+
+        prior = merged[int(existing_idx)];
+        added_quantity = _convert_quantity_between_units(seeded.quantity, seeded.unit, prior.unit);
+        if added_quantity <= 0.0 {
+            fallback_key = "{}|{}".format(merge_key, str(len(merged)));
+            merged.append(seeded);
+            bucket_index[fallback_key] = len(merged) - 1;
+            continue;
+        }
+
+        merged_count += 1;
+        merged_quantity = _round_two(prior.quantity + added_quantity);
+        merged_cost = _round_two(prior.cost + seeded.cost);
+        merged_protein = _round_two(prior.protein + seeded.protein);
+        merged_carb = _round_two(prior.carb + seeded.carb);
+        merged_fat = _round_two(prior.fat + seeded.fat);
+        merged_name = _prefer_display_ingredient_name(prior.name, seeded.name);
+        merged_serving_size = str(prior.serving_size).strip();
+        if merged_serving_size == "" {
+            merged_serving_size = str(seeded.serving_size).strip();
+        }
+
+        merged[int(existing_idx)] = Ingredient(
+            name=merged_name,
+            quantity=merged_quantity,
+            unit=prior.unit,
+            cost=merged_cost,
+            protein=merged_protein,
+            carb=merged_carb,
+            fat=merged_fat,
+            serving_size=merged_serving_size,
+            package_quantity=merged_quantity,
+            package_unit=prior.unit
+        );
+    }
+
+    note = "";
+    if merged_count > 0 {
+        note = "Combined {} duplicate receipt rows before USDA lookup.".format(str(merged_count));
+        print(
+            "[ReceiptLookupMerge] context={} input_count={} output_count={} merged_count={}".format(
+                context_label,
+                str(len(items)),
+                str(len(merged)),
+                str(merged_count)
+            )
+        );
+    }
+    return {"items": merged, "notes": note, "merged_count": merged_count};
+}
+
 def _fallback_extract_items_from_ocr_text(text_in: str) -> list {
     items: list = [];
     pending_name = "";
@@ -1654,10 +2289,17 @@ def _enrich_items_with_usda_macros(
     fallback_count = 0;
     summary_note = "";
     lookup_available = True;
+    combine_out = _combine_items_before_nutrition_lookup(items, context_label);
+    lookup_items = combine_out.get("items", items);
+    summary_note = _note_merge(summary_note, str(combine_out.get("notes", "")));
+    hint_out = _usda_search_hints_for_items(lookup_items, store_name);
+    used_llm_search = hint_out.get("used_llm", False);
+    summary_note = _note_merge(summary_note, str(hint_out.get("notes", "")));
+    hinted_rows = hint_out.get("hints", []);
 
     first_lookup: dict = {"ok": False, "results": []};
     try {
-        first_lookup = _fooddata_lookup_batch(items, [], store_name);
+        first_lookup = _fooddata_lookup_batch(lookup_items, hinted_rows, store_name);
     } except Exception as e {
         lookup_available = False;
         print("[FoodDataCentral] context={} stage=lookup:error err={}".format(context_label, str(e)));
@@ -1666,7 +2308,7 @@ def _enrich_items_with_usda_macros(
 
     first_results = first_lookup.get("results", []);
     idx = 0;
-    for ing in items {
+    for ing in lookup_items {
         row = {};
         if idx < len(first_results) {
             row = first_results[idx];
@@ -1685,51 +2327,11 @@ def _enrich_items_with_usda_macros(
         idx += 1;
     }
 
-    if unresolved_indices != [] {
-        missing_items: list[Ingredient] = [];
-        for miss_idx in unresolved_indices {
-            missing_items.append(items[miss_idx]);
-        }
-
-        hint_out = _usda_search_hints_for_items(missing_items, store_name);
-        used_llm_search = hint_out.get("used_llm", False);
-        summary_note = _note_merge(summary_note, str(hint_out.get("notes", "")));
-
-        hinted_rows = hint_out.get("hints", []);
-        if hinted_rows != [] {
-            second_lookup: dict = {"ok": False, "results": []};
-            try {
-                second_lookup = _fooddata_lookup_batch(missing_items, hinted_rows, store_name);
-            } except Exception as e {
-                print("[FoodDataCentral] context={} stage=hinted_lookup:error err={}".format(context_label, str(e)));
-                summary_note = _note_merge(summary_note, "Hinted USDA CSV lookup failed: {}".format(str(e)));
-            }
-
-            second_results = second_lookup.get("results", []);
-            still_unresolved: list = [];
-            local_idx = 0;
-            for miss_idx in unresolved_indices {
-                row = {};
-                if local_idx < len(second_results) {
-                    row = second_results[local_idx];
-                }
-                if row.get("matched", False) {
-                    matched_lookup_rows[str(miss_idx)] = row;
-                    matched_count += 1;
-                } else {
-                    still_unresolved.append(miss_idx);
-                }
-                local_idx += 1;
-            }
-            unresolved_indices = still_unresolved;
-        }
-    }
-
     estimate_map: dict = {};
     if unresolved_indices != [] {
         fallback_items: list[Ingredient] = [];
         for miss_idx in unresolved_indices {
-            fallback_items.append(items[miss_idx]);
+            fallback_items.append(lookup_items[miss_idx]);
         }
         fallback_out = _usda_macro_estimates_for_items(fallback_items);
         used_llm_fallback = fallback_out.get("used_llm", False);
@@ -1740,7 +2342,7 @@ def _enrich_items_with_usda_macros(
     final_items: list[Ingredient] = [];
     still_unresolved_names: list = [];
     idx = 0;
-    for ing in items {
+    for ing in lookup_items {
         lookup_row = matched_lookup_rows.get(str(idx), None);
         if lookup_row != None {
             final_items.append(_ingredient_with_lookup_row(ing, lookup_row));
@@ -1770,7 +2372,7 @@ def _enrich_items_with_usda_macros(
 
     summary_note = _note_merge(
         summary_note,
-        "USDA CSV macros matched {}/{} items.".format(str(matched_count), str(len(items)))
+        "USDA CSV macros matched {}/{} items.".format(str(matched_count), str(len(lookup_items)))
     );
     if fallback_count > 0 {
         summary_note = _note_merge(
@@ -1947,6 +2549,8 @@ node Recipe {
         total_protein_g: float,
         total_carbs_g: float,
         total_fat_g: float,
+        preference_encoding: str = "",
+        meal_type: str = "",
         recipe_id: str = "",
         generated_at_ms: int = 0;
 }
@@ -1979,6 +2583,8 @@ node RecipeHistoryEntry {
         favorite: bool = False,
         made: bool = False,
         made_at_ms: int = 0,
+        meal_type: str = "",
+        preference_encoding: str = "",
         notes: str = "Generated from your profile + pantry";
 }
 
@@ -1990,9 +2596,11 @@ node RecipeHistoryEntry {
 walker GenerateRecipeFromPantry {
     has profile: dict;
     has pantry_ingredients: list[dict];
+    has meal_type: str = "";
     has new_recipe_nodes: list = [];
     has new_history_nodes: list = [];
     has new_ingredient_nodes: list = [];
+    has preference_history_nodes: list = [];
 
     can generate with Root entry {
         try {
@@ -2012,7 +2620,17 @@ walker GenerateRecipeFromPantry {
                 }
             }
 
-            plan = generate_recipe(profile_obj, pantry_typed);
+            requested_meal_type = _normalize_meal_type(self.meal_type);
+            preference_hints = _recipe_preference_hints_from_history(
+                self.preference_history_nodes,
+                requested_meal_type
+            );
+            profile_for_recipe = _profile_with_meal_request(
+                profile_obj,
+                requested_meal_type,
+                preference_hints
+            );
+            plan = generate_recipe(profile_for_recipe, pantry_typed);
             recipe_id = str(uuid.uuid4());
             generated_at_ms = _now_ms();
 
@@ -2024,6 +2642,16 @@ walker GenerateRecipeFromPantry {
                 total_protein_g=plan.total_protein_g,
                 total_carbs_g=plan.total_carbs_g,
                 total_fat_g=plan.total_fat_g,
+                preference_encoding=_resolved_recipe_preference_encoding(
+                    plan.preference_encoding,
+                    plan.recipe_name,
+                    [],
+                    requested_meal_type,
+                    plan.total_protein_g,
+                    plan.total_carbs_g,
+                    plan.total_fat_g
+                ),
+                meal_type=requested_meal_type,
                 generated_at_ms=generated_at_ms
             );
 
@@ -2045,6 +2673,20 @@ walker GenerateRecipeFromPantry {
                 result.append(ing_data);
             }
 
+            preference_encoding = _resolved_recipe_preference_encoding(
+                plan.preference_encoding,
+                plan.recipe_name,
+                result,
+                requested_meal_type,
+                plan.total_protein_g,
+                plan.total_carbs_g,
+                plan.total_fat_g
+            );
+            if len(self.new_recipe_nodes) > 0 {
+                self.new_recipe_nodes[0].preference_encoding = preference_encoding;
+            }
+            generated_note = _generated_recipe_note(requested_meal_type, len(preference_hints));
+
             self.new_history_nodes = here ++> RecipeHistoryEntry(
                 recipe_id=recipe_id,
                 title=plan.recipe_name,
@@ -2054,7 +2696,10 @@ walker GenerateRecipeFromPantry {
                 total_fat_g=plan.total_fat_g,
                 instructions=plan.instructions,
                 ingredients=result,
-                generated_at_ms=generated_at_ms
+                generated_at_ms=generated_at_ms,
+                meal_type=requested_meal_type,
+                preference_encoding=preference_encoding,
+                notes=generated_note
             );
 
             if len(self.new_recipe_nodes) > 0 {
@@ -2078,6 +2723,8 @@ walker GenerateRecipeFromPantry {
                 "total_protein_g": plan.total_protein_g,
                 "total_carbs_g": plan.total_carbs_g,
                 "total_fat_g": plan.total_fat_g,
+                "preference_encoding": preference_encoding,
+                "meal_type": requested_meal_type,
                 "generated_at_ms": generated_at_ms,
                 "favorite": False,
                 "made": False,
@@ -2085,7 +2732,7 @@ walker GenerateRecipeFromPantry {
                 "rating": 0.0,
                 "rating_tier": "",
                 "rating_order": -1,
-                "notes": "Generated from your profile + pantry"
+                "notes": generated_note
             };
         } except Exception as e {
             report {
@@ -2103,6 +2750,10 @@ walker GenerateRecipeFromPantry {
     can clear_old_ingredients with MealIngredient entry {
         # Keep ingredient list aligned with latest generated recipe.
         del here;
+    }
+
+    can collect_preference_history with RecipeHistoryEntry entry {
+        self.preference_history_nodes.append(here);
     }
 }
 
@@ -2134,6 +2785,8 @@ walker ListGeneratedRecipe {
             "total_protein_g": here.total_protein_g,
             "total_carbs_g": here.total_carbs_g,
             "total_fat_g": here.total_fat_g,
+            "preference_encoding": _history_preference_encoding(here),
+            "meal_type": _normalize_meal_type(here.meal_type),
             "generated_at_ms": here.generated_at_ms
         };
     }
@@ -2199,6 +2852,8 @@ walker ListRecipeHistory {
             "favorite": _history_favorite(here),
             "made": _history_made(here),
             "made_at_ms": _history_made_at_ms(here),
+            "meal_type": _history_meal_type(here),
+            "preference_encoding": _history_preference_encoding(here),
             "notes": _history_notes(here),
             "instructions": _history_instructions(here),
             "ingredients": _history_ingredients(here)
@@ -2224,6 +2879,7 @@ walker SetRecipeFavorite {
     has rating_tier: str = "";
     has rating_order: int = -1;
     has notes: str = "Generated from your profile + pantry";
+    has preference_encoding: str = "";
 
     can collect with Root entry {
         visit [-->];
@@ -2244,6 +2900,7 @@ walker SetRecipeFavorite {
         self.rating_tier = _history_rating_tier(here);
         self.rating_order = _history_rating_order(here);
         self.notes = _history_notes(here);
+        self.preference_encoding = _history_preference_encoding(here);
         here.favorite = self.favorite;
     }
 
@@ -2267,6 +2924,7 @@ walker MarkRecipeMade {
     has recipe_id: str;
     has made: bool = True;
     has made_at_ms: int = 0;
+    has meal_type: str = "";
     has updated: bool = False;
     has current_title: str = "";
     has current_total_calories: float = 0.0;
@@ -2276,6 +2934,8 @@ walker MarkRecipeMade {
     has current_instructions: list = [];
     has current_ingredients: list = [];
     has current_generated_at_ms: int = 0;
+    has current_meal_type: str = "";
+    has current_preference_encoding: str = "";
     has found_current_recipe: bool = False;
     has touched_history_nodes: list = [];
     has created_history_nodes: list = [];
@@ -2300,6 +2960,8 @@ walker MarkRecipeMade {
         self.current_total_fat_g = here.total_fat_g;
         self.current_instructions = here.instructions;
         self.current_generated_at_ms = here.generated_at_ms;
+        self.current_meal_type = _normalize_meal_type(here.meal_type);
+        self.current_preference_encoding = _history_preference_encoding(here);
         self.cleared_generated = True;
         del here;
     }
@@ -2332,17 +2994,29 @@ walker MarkRecipeMade {
         if _history_ingredients(here) == [] and self.current_ingredients != [] {
             here.ingredients = self.current_ingredients;
         }
+        if _history_preference_encoding(here) == "" and self.current_preference_encoding != "" {
+            here.preference_encoding = self.current_preference_encoding;
+        }
         here.made = self.made;
         if self.made {
+            requested_meal_type = _normalize_meal_type(self.meal_type);
             here.made_at_ms = self.made_at_ms;
+            if requested_meal_type != "" {
+                here.meal_type = requested_meal_type;
+            }
         } else {
             here.made_at_ms = 0;
+            here.meal_type = "";
         }
         self.touched_history_nodes.append(here);
     }
 
     can finish with Root exit {
         if not self.updated and self.found_current_recipe {
+            next_meal_type = _normalize_meal_type(self.meal_type);
+            if next_meal_type == "" {
+                next_meal_type = self.current_meal_type;
+            }
             self.created_history_nodes = here ++> RecipeHistoryEntry(
                 recipe_id=self.recipe_id,
                 title=self.current_title,
@@ -2353,8 +3027,10 @@ walker MarkRecipeMade {
                 instructions=self.current_instructions,
                 ingredients=self.current_ingredients,
                 generated_at_ms=(self.current_generated_at_ms if self.current_generated_at_ms > 0 else _now_ms()),
+                preference_encoding=self.current_preference_encoding,
                 made=self.made,
-                made_at_ms=(self.made_at_ms if self.made else 0)
+                made_at_ms=(self.made_at_ms if self.made else 0),
+                meal_type=(next_meal_type if self.made or next_meal_type != "" else "")
             );
             self.updated = True;
         }
@@ -2379,6 +3055,11 @@ walker MarkRecipeMade {
             "recipe_id": self.recipe_id,
             "made": self.made,
             "made_at_ms": (self.made_at_ms if self.made else 0),
+            "meal_type": (
+                _normalize_meal_type(self.meal_type)
+                if _normalize_meal_type(self.meal_type) != ""
+                else self.current_meal_type
+            ),
             "cleared_generated": self.cleared_generated
         };
     }
@@ -2707,51 +3388,99 @@ walker ParseReceiptImageToPantry {
                 };
                 return;
             }
+            _print_receipt_debug_text(request_id, "ocr_text", text_in);
 
-            print("[ParseReceiptImageToPantry] request_id={} stage=llm:start".format(request_id));
+            print("[ParseReceiptImageToPantry] request_id={} stage=llm_extract_costs:start".format(request_id));
             llm_started_ms = _now_ms();
             parsed = None;
+            parse_stage = "llm_pipeline";
+            parse_note_prefix = "";
             try {
-                parsed = parse_receipt_text_into_pantry_items(text_in);
-            } except Exception as llm_e {
-                llm_ms = _now_ms() - llm_started_ms;
-                print("[ParseReceiptImageToPantry] request_id={} stage=llm:error llm_ms={} err={}".format(request_id, llm_ms, str(llm_e)));
-                fallback_items = _fallback_extract_items_from_ocr_text(text_in);
-                if fallback_items != [] {
-                    fallback_total = 0.0;
-                    for it in fallback_items {
-                        fallback_total += float(it["cost"]);
+                cost_batch = extract_receipt_food_items_with_costs(text_in);
+                _print_receipt_debug_json(
+                    request_id,
+                    "llm_cost_items",
+                    _receipt_cost_batch_debug_payload(cost_batch, "llm_extract_costs")
+                );
+                seed_items = _receipt_cost_batch_seed_items(cost_batch);
+                print("[ParseReceiptImageToPantry] request_id={} stage=llm_infer_quantities:start".format(request_id));
+                quantity_batch = infer_receipt_item_total_quantities(
+                    cost_batch.store_name,
+                    text_in,
+                    seed_items
+                );
+                _print_receipt_debug_json(
+                    request_id,
+                    "llm_quantity_output",
+                    _receipt_quantity_debug_payload(quantity_batch, "llm_infer_quantities")
+                );
+                parsed = _receipt_pipeline_parse_from_batches(cost_batch, quantity_batch, text_in);
+            } except Exception as pipeline_e {
+                parse_note_prefix = "OCR item extraction pipeline failed, so fallback receipt text parsing was used instead.";
+                print("[ParseReceiptImageToPantry] request_id={} stage=llm_pipeline:error err={}".format(request_id, str(pipeline_e)));
+            }
+
+            if parsed == None or parsed.food_line_items == [] {
+                if parsed != None and parsed.food_line_items == [] {
+                    parse_note_prefix = _note_merge(
+                        parse_note_prefix,
+                        "OCR item extraction pipeline returned no food items, so fallback receipt text parsing was used instead."
+                    );
+                }
+                try {
+                    print("[ParseReceiptImageToPantry] request_id={} stage=llm_text:start".format(request_id));
+                    parsed = parse_receipt_text_into_pantry_items(text_in);
+                    parse_stage = "llm_text";
+                } except Exception as llm_e {
+                    llm_ms = _now_ms() - llm_started_ms;
+                    print("[ParseReceiptImageToPantry] request_id={} stage=llm_text:error llm_ms={} err={}".format(request_id, llm_ms, str(llm_e)));
+                    fallback_items = _fallback_extract_items_from_ocr_text(text_in);
+                    if fallback_items != [] {
+                        fallback_total = 0.0;
+                        for it in fallback_items {
+                            fallback_total += float(it["cost"]);
+                        }
+                        report {
+                            "ok": True,
+                            "stage": "llm_fallback",
+                            "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
+                            "items": fallback_items,
+                            "store_name": "",
+                            "subtotal": 0.0,
+                            "tax": 0.0,
+                            "extracted_text": text_in,
+                            "receipt_total": 0.0,
+                            "parsed_items_total": fallback_total,
+                            "total_delta": fallback_total,
+                            "total_match": False,
+                            "notes": _note_merge(parse_note_prefix, "LLM parse failed; fallback OCR line parser was used."),
+                            "error": ""
+                        };
+                        return;
                     }
                     report {
-                        "ok": True,
-                        "stage": "llm_fallback",
+                        "ok": False,
+                        "stage": parse_stage,
                         "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
-                        "items": fallback_items,
-                        "store_name": "",
-                        "subtotal": 0.0,
-                        "tax": 0.0,
+                        "items": [],
                         "extracted_text": text_in,
-                        "receipt_total": 0.0,
-                        "parsed_items_total": fallback_total,
-                        "total_delta": fallback_total,
-                        "total_match": False,
-                        "notes": "LLM parse failed; fallback OCR line parser was used.",
-                        "error": ""
+                        "error": str(llm_e)
                     };
                     return;
                 }
-                report {
-                    "ok": False,
-                    "stage": "llm",
-                    "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
-                    "items": [],
-                    "extracted_text": text_in,
-                    "error": str(llm_e)
-                };
-                return;
             }
             llm_ms = _now_ms() - llm_started_ms;
-            print("[ParseReceiptImageToPantry] request_id={} stage=llm:end llm_ms={}".format(request_id, llm_ms));
+            print("[ParseReceiptImageToPantry] request_id={} stage={}:end llm_ms={}".format(request_id, parse_stage, llm_ms));
+            parsed_notes = _note_merge(parse_note_prefix, parsed.notes);
+            extracted_text_out = str(parsed.extracted_text).strip();
+            if extracted_text_out == "" {
+                extracted_text_out = text_in;
+            }
+            _print_receipt_debug_json(
+                request_id,
+                "llm_output",
+                _receipt_parse_debug_payload(parsed, parse_stage)
+            );
             raw_items_typed: list[Ingredient] = [];
             parsed_items_total = 0.0;
             for ing in parsed.food_line_items {
@@ -2781,6 +3510,21 @@ walker ParseReceiptImageToPantry {
                 }
                 items.append(ingredient_to_payload(ing));
             }
+            _print_receipt_debug_json(
+                request_id,
+                "final_payload",
+                {
+                    "parse_stage": parse_stage,
+                    "items": items,
+                    "nutrition_lookup": {
+                        "matched_count": nutrition_out.get("matched_count", 0),
+                        "fallback_count": nutrition_out.get("fallback_count", 0),
+                        "unresolved_count": nutrition_out.get("unresolved_count", 0),
+                        "used_llm_search": nutrition_out.get("used_llm_search", False),
+                        "used_llm_fallback": nutrition_out.get("used_llm_fallback", False)
+                    }
+                }
+            );
 
             receipt_total = parsed.receipt_total;
             total_delta = parsed_items_total - receipt_total;
@@ -2795,7 +3539,7 @@ walker ParseReceiptImageToPantry {
 
             if not total_match {
                 mismatch_note = "Warning: receipt total mismatch. Parsed item sum may be incomplete due to OCR quality.";
-                merged_notes = _note_merge(parsed.notes, nutrition_notes);
+                merged_notes = _note_merge(parsed_notes, nutrition_notes);
                 merged_notes = _note_merge(merged_notes, canonical_notes);
                 merged_notes = _note_merge(merged_notes, mismatch_note);
 
@@ -2829,7 +3573,7 @@ walker ParseReceiptImageToPantry {
                     }
                     report {
                         "ok": True,
-                        "stage": "llm",
+                        "stage": parse_stage,
                         "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                         "items": items,
                         "receipt_total": receipt_total,
@@ -2851,7 +3595,7 @@ walker ParseReceiptImageToPantry {
 
                 report {
                     "ok": True,
-                    "stage": "llm",
+                    "stage": parse_stage,
                     "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                     "items": items,
                     "receipt_total": receipt_total,
@@ -2873,18 +3617,18 @@ walker ParseReceiptImageToPantry {
 
             report {
                 "ok": True,
-                "stage": "llm",
+                "stage": parse_stage,
                 "diagnostics": _diag_payload(request_id, started_ms, ocr_ms, llm_ms),
                 "items": items,
                 "store_name": parsed.store_name,
                 "subtotal": parsed.subtotal,
                 "tax": parsed.tax,
-                "extracted_text": text_in,
+                "extracted_text": extracted_text_out,
                 "receipt_total": receipt_total,
                 "parsed_items_total": parsed_items_total,
                 "total_delta": total_delta,
                 "total_match": True,
-                "notes": _note_merge(_note_merge(parsed.notes, nutrition_notes), canonical_notes),
+                "notes": _note_merge(_note_merge(parsed_notes, nutrition_notes), canonical_notes),
                 "nutrition_lookup": {
                     "matched_count": nutrition_out.get("matched_count", 0),
                     "fallback_count": nutrition_out.get("fallback_count", 0),

@@ -1,12 +1,10 @@
 """Main entry point for CaloReceipt."""
 
+cl import from frontend { app as ClientApp }
 cl {
-    import from frontend { app as ClientApp }
-
-    # Root client app mount used by `jac start`.
-    def:pub app -> object {
-        return
-            <ClientApp />;
+    # Root client app mount used by f"jac start".
+    def:pub app() -> JsxElement {
+        return <ClientApp />;
     }
 }
 

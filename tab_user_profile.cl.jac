@@ -170,7 +170,7 @@ def:pub UserProfileTab(
                     "Authorization": ("Bearer " + jac_token) if jac_token else ""
                 },
                 "credentials": "include",
-                "body": JSON.stringify(payload)
+                "body": JSON.stringify(payload or {})
             }
         );
         raw_text = await response.text();

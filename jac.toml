@@ -50,3 +50,18 @@ private_key_path = ""
 private_key = ""
 
 [plugins.client]
+
+[plugins.client.pwa]
+theme_color = "#4CAF50"
+background_color = "#ffffff"
+cache_name = "caloreceipt-cache-v1"
+install_banner = true
+install_banner_delay = 3000
+install_banner_position = "bottom"
+install_button_text = "Install CaloReceipt"
+install_dismiss_text = "Not Now"
+
+[plugins.client.pwa.manifest]
+name = "CaloReceipt"
+short_name = "CaloReceipt"
+description = "AI-powered receipt scanning, nutrition tracking, and recipe generation"
